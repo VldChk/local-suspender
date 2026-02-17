@@ -800,6 +800,13 @@ async function validateState(state) {
       continue;
     }
 
+    // Prune entries with unsafe URLs (javascript:, data:, etc.)
+    if (!isSafeUrl(entry.url)) {
+      delete state.suspendedTabs[tabId];
+      changed = true;
+      continue;
+    }
+
     if (entry.method === 'discard') {
       if (!tab.discarded) {
         delete state.suspendedTabs[tabId];
@@ -891,17 +898,16 @@ async function handleTabUpdated(tabId, changeInfo, tab) {
       if ('discarded' in changeInfo) {
         if (changeInfo.discarded) {
           const settings = await ensureSettings();
-          if (tab.incognito || !(await shouldSuspendTab(tab, settings, Date.now()))) {
-            return;
+          if (!tab.incognito && (await shouldSuspendTab(tab, settings, Date.now()))) {
+            state.suspendedTabs[tabId] = {
+              url: tab.url,
+              title: tab.title,
+              windowId: tab.windowId,
+              suspendedAt: Date.now(),
+              method: 'discard',
+            };
+            modified = true;
           }
-          state.suspendedTabs[tabId] = {
-            url: tab.url,
-            title: tab.title,
-            windowId: tab.windowId,
-            suspendedAt: Date.now(),
-            method: 'discard',
-          };
-          modified = true;
         } else if (state.suspendedTabs[tabId]?.method === 'discard') {
           delete state.suspendedTabs[tabId];
           modified = true;
@@ -1353,7 +1359,12 @@ async function reconcilePendingStateAfterUnlock() {
     }
 
     cachedState = merged;
-    await saveStateInternal(merged);
+    try {
+      await saveStateInternal(merged);
+    } catch (saveErr) {
+      Logger.error('Failed to re-encrypt state after unlock', saveErr);
+      markStateCorrupt('corrupt-state');
+    }
 
   } finally {
     releaseLock();
@@ -1658,7 +1669,6 @@ function handleMessage(message, sender, sendResponse) {
           if (TOKEN_TTL_MS && issuedAt && Date.now() - issuedAt > TOKEN_TTL_MS) {
             return { ok: false, error: 'expired' };
           }
-          entry.tokenUsed = true;
           const resumed = await resumeSuspendedTab(tabId, entry, { focus: true });
           if (resumed) {
             delete state.suspendedTabs[tabId];

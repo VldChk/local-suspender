@@ -363,12 +363,37 @@ export async function unlockWithPasskey(passkey) {
   }
   try {
     await unwrapDataKey(passkey, record);
-    return { ok: true };
   } catch (err) {
     Logger.warn('Passkey unlock failed', err);
     markEncryptionLocked('bad-passkey');
     return { ok: false, error: 'bad-passkey' };
   }
+
+  // Upgrade weak PBKDF2 iteration count after successful unwrap
+  const recordIterations = record.iterations || settings.encryption.iterations;
+  if (recordIterations < MIN_ITERATIONS) {
+    try {
+      Logger.info('Upgrading PBKDF2 iterations', {
+        from: recordIterations,
+        to: Math.max(settings.encryption.iterations, MIN_ITERATIONS),
+      });
+      const wrapped = await wrapDataKey(passkey);
+      const upgraded = {
+        ...record,
+        encryptedKey: wrapped.encryptedKey,
+        keySalt: wrapped.keySalt,
+        keyIV: wrapped.keyIV,
+        iterations: wrapped.iterations,
+        updatedAt: Date.now(),
+      };
+      await persistKeyRecord(upgraded);
+    } catch (upgradeErr) {
+      // Non-fatal: key is already unwrapped and usable
+      Logger.warn('Failed to upgrade PBKDF2 iteration count', upgradeErr);
+    }
+  }
+
+  return { ok: true };
 }
 
 export async function setPasskey(passkey) {

@@ -11,6 +11,17 @@ const unsuspendAllBtn = document.getElementById('unsuspendAll');
 let currentSuspendedTabId = null;
 let currentSuspendedUrl = null;
 let lastRenderedStateHash = '';
+let refreshTimer = null;
+
+function scheduleRefresh(message) {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+  }
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    refreshState(message);
+  }, 150);
+}
 
 async function sendMessage(type, payload = {}) {
   try {
@@ -31,22 +42,22 @@ document.getElementById('suspendCurrent').addEventListener('click', async () => 
       return;
     }
     if (response.skipped === 'incognito') {
-      await refreshState('Skipped: incognito tabs are never suspended.');
+      scheduleRefresh('Skipped: incognito tabs are never suspended.');
       return;
     }
     if (response.skipped === 'unsafe-url') {
-      await refreshState('Skipped: this tab URL cannot be suspended.');
+      scheduleRefresh('Skipped: this tab URL cannot be suspended.');
       return;
     }
     if (response.skipped === 'policy-excluded') {
-      await refreshState('Skipped by current suspension policy.');
+      scheduleRefresh('Skipped by current suspension policy.');
       return;
     }
     if (response.skipped === 'locked') {
-      await refreshState('Skipped: state is locked. Unlock or reset from options.');
+      scheduleRefresh('Skipped: state is locked. Unlock or reset from options.');
       return;
     }
-    await refreshState('Suspended current tab.');
+    scheduleRefresh('Suspended current tab.');
   } catch (err) {
     statusEl.textContent = 'Failed to suspend tab.';
   }
@@ -60,10 +71,10 @@ document.getElementById('suspendInactive').addEventListener('click', async () =>
       return;
     }
     if (result.skipped === 'locked') {
-      await refreshState('Skipped: state is locked. Unlock or reset from options.');
+      scheduleRefresh('Skipped: state is locked. Unlock or reset from options.');
       return;
     }
-    await refreshState('Suspended inactive tabs.');
+    scheduleRefresh('Suspended inactive tabs.');
   } catch (err) {
     statusEl.textContent = 'Failed to suspend inactive tabs.';
   }
@@ -76,7 +87,7 @@ document.getElementById('unsuspendAll').addEventListener('click', async () => {
       statusEl.textContent = 'Failed to unsuspend tabs.';
       return;
     }
-    await refreshState('Unsuspended all tabs.');
+    scheduleRefresh('Unsuspended all tabs.');
   } catch (err) {
     statusEl.textContent = 'Failed to unsuspend tabs.';
   }
@@ -150,7 +161,7 @@ if (neverSuspendSiteBtn) {
         statusEl.textContent = 'Failed to save whitelist changes.';
         return;
       }
-      await refreshState(`Added "${domain}" to whitelist and unsuspended.`);
+      scheduleRefresh(`Added "${domain}" to whitelist and unsuspended.`);
       tabsHeaderEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
       const confirmation = document.createElement('div');
       confirmation.className = 'status-message';
@@ -202,7 +213,7 @@ async function handleUnsuspend(tabId, windowId) {
     if (windowId) {
       await chrome.windows.update(windowId, { focused: true });
     }
-    await refreshState('Unsuspended tab.');
+    scheduleRefresh('Unsuspended tab.');
   } catch (err) {
     statusEl.textContent = 'Failed to unsuspend tab.';
   }
