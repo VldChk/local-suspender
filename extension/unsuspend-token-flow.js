@@ -36,7 +36,8 @@ export async function processUnsuspendTokenMessage({
       return { ok: false, error: 'expired' };
     }
 
-    // Reserve the token before resume to block concurrent attempts.
+    // Strict one-shot policy: consume the token before attempting resume.
+    // This remains consumed even if resume fails, preventing token replay.
     entry.tokenUsed = true;
     await saveState(state);
 
@@ -49,21 +50,6 @@ export async function processUnsuspendTokenMessage({
 
   const resumed = await resumeSuspendedTab(tabId, prepareResult.entry, { focus: true });
   if (!resumed) {
-    await withStateLock(async () => {
-      if (!stateIsWritable()) {
-        return;
-      }
-      const state = await loadState();
-      if (!state) {
-        return;
-      }
-      const entry = state.suspendedTabs?.[tabId];
-      if (entry && entry.token === token && entry.tokenUsed) {
-        // Retry-friendly rollback: failed resume should allow another wake attempt.
-        entry.tokenUsed = false;
-        await saveState(state);
-      }
-    });
     return { ok: false, error: 'resume-failed' };
   }
 

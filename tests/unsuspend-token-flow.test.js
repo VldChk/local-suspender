@@ -77,24 +77,24 @@ test('UNSUSPEND_TOKEN rejects second use after successful wake', async () => {
   assert.equal(harness.saveCount, 2);
 });
 
-test('UNSUSPEND_TOKEN rolls back tokenUsed when resume fails so retry can succeed', async () => {
+test('UNSUSPEND_TOKEN keeps token consumed when resume fails (strict one-shot)', async () => {
   const harness = createHarness({
     initialState: {
       suspendedTabs: {
         1: { token: 'token-1', tokenUsed: false, tokenIssuedAt: 1_000 },
       },
     },
-    resumeResult: [false, true],
+    resumeResult: false,
   });
 
   const firstAttempt = await harness.invoke();
 
   assert.deepEqual(firstAttempt, { ok: false, error: 'resume-failed' });
-  assert.equal(harness.state.suspendedTabs[1].tokenUsed, false);
+  assert.equal(harness.state.suspendedTabs[1].tokenUsed, true);
 
   const secondAttempt = await harness.invoke();
 
-  assert.deepEqual(secondAttempt, { ok: true });
-  assert.equal(harness.state.suspendedTabs[1], undefined);
-  assert.equal(harness.saveCount, 4);
+  assert.deepEqual(secondAttempt, { ok: false, error: 'used' });
+  assert.equal(harness.state.suspendedTabs[1].tokenUsed, true);
+  assert.equal(harness.saveCount, 1);
 });
