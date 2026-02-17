@@ -18,6 +18,7 @@ import {
 import { ensureSettings, saveSettings as persistSettings, defaultSettings, SETTINGS_KEY } from './settings.js';
 import { sessionGet, sessionSet, sessionRemove } from './session.js';
 import { encodeStateV2, decodeStateAny } from './state-codec.js';
+import { processUnsuspendTokenMessage } from './unsuspend-token-flow.js';
 
 const STATE_KEY = 'suspenderState';
 const SESSION_LAST_ACTIVE_KEY = 'lastActive';
@@ -1640,42 +1641,21 @@ function handleMessage(message, sender, sendResponse) {
         break;
       }
       case 'UNSUSPEND_TOKEN': {
-        if (!stateIsWritable()) {
-          sendResponse(lockedMutationResponse());
-          break;
-        }
-        const { token } = message;
         const tabId = Number(message.tabId);
         if (!Number.isInteger(tabId)) {
           sendResponse({ ok: false });
           break;
         }
-        const tokenResult = await withStateLock(async () => {
-          if (!stateIsWritable()) {
-            return lockedMutationResponse();
-          }
-          const state = await loadState();
-          if (!state) {
-            return lockedMutationResponse();
-          }
-          const entry = state.suspendedTabs[tabId];
-          if (!entry || entry.token !== token) {
-            return { ok: false, error: 'invalid-token' };
-          }
-          if (entry.tokenUsed) {
-            return { ok: false, error: 'used' };
-          }
-          const issuedAt = entry.tokenIssuedAt || entry.suspendedAt;
-          if (TOKEN_TTL_MS && issuedAt && Date.now() - issuedAt > TOKEN_TTL_MS) {
-            return { ok: false, error: 'expired' };
-          }
-          const resumed = await resumeSuspendedTab(tabId, entry, { focus: true });
-          if (resumed) {
-            delete state.suspendedTabs[tabId];
-            await saveState(state);
-            return { ok: true };
-          }
-          return { ok: false, error: 'resume-failed' };
+        const tokenResult = await processUnsuspendTokenMessage({
+          tabId,
+          token: message.token,
+          tokenTtlMs: TOKEN_TTL_MS,
+          stateIsWritable,
+          lockedMutationResponse,
+          withStateLock,
+          loadState,
+          saveState,
+          resumeSuspendedTab,
         });
         sendResponse(tokenResult);
         break;
