@@ -399,11 +399,7 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
     return { ok: false, locked: true };
   }
   const state = await getSnapshotData(snapshot);
-  const entries = Object.values(state?.suspendedTabs || {}).map(entry => ({
-    url: entry?.url,
-    title: entry?.title,
-    favIconUrl: entry?.favIconUrl,
-  }));
+  const entries = Object.values(state?.suspendedTabs || {});
   if (!entries.length) {
     return { ok: true, opened: 0 };
   }
@@ -423,15 +419,20 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
 
   const filteredEntries = [];
   for (const entry of entries) {
-    if (!isSafeUrl(entry.url)) continue;
+    const parsedEntry = {
+      url: entry?.url,
+      title: entry?.title,
+      favIconUrl: entry?.favIconUrl,
+    };
+    if (!isSafeUrl(parsedEntry.url)) continue;
     if (!unsuspend) {
-      const urlKey = entry.url;
+      const urlKey = parsedEntry.url;
       if (existingUrls.has(urlKey) || seenUrls.has(urlKey)) {
         continue; // Avoid duplicates in state and tabs
       }
       seenUrls.add(urlKey);
     }
-    filteredEntries.push(entry);
+    filteredEntries.push(parsedEntry);
   }
 
   if (!filteredEntries.length) {
