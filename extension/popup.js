@@ -54,6 +54,15 @@ function getActionFailureMessage(defaultMessage, interpreted) {
   return defaultMessage;
 }
 
+function presentActionFailure(defaultMessage, interpreted) {
+  const message = getActionFailureMessage(defaultMessage, interpreted);
+  if (interpreted.locked || interpreted.reason === 'corrupt-state') {
+    scheduleRefresh(message);
+    return;
+  }
+  statusEl.textContent = message;
+}
+
 // --- Event Listeners ---
 
 document.getElementById('suspendCurrent').addEventListener('click', async () => {
@@ -75,7 +84,7 @@ document.getElementById('suspendCurrent').addEventListener('click', async () => 
       scheduleRefresh('Suspended current tab.');
       return;
     }
-    statusEl.textContent = getActionFailureMessage('Failed to suspend tab.', interpreted);
+    presentActionFailure('Failed to suspend tab.', interpreted);
   } catch (err) {
     statusEl.textContent = 'Failed to suspend tab.';
   }
@@ -88,7 +97,7 @@ document.getElementById('suspendInactive').addEventListener('click', async () =>
       scheduleRefresh('Suspended inactive tabs.');
       return;
     }
-    statusEl.textContent = getActionFailureMessage('Failed to suspend inactive tabs.', interpreted);
+    presentActionFailure('Failed to suspend inactive tabs.', interpreted);
   } catch (err) {
     statusEl.textContent = 'Failed to suspend inactive tabs.';
   }
@@ -101,7 +110,7 @@ document.getElementById('unsuspendAll').addEventListener('click', async () => {
       scheduleRefresh('Unsuspended all tabs.');
       return;
     }
-    statusEl.textContent = getActionFailureMessage('Failed to unsuspend tabs.', interpreted);
+    presentActionFailure('Failed to unsuspend tabs.', interpreted);
   } catch (err) {
     statusEl.textContent = 'Failed to unsuspend tabs.';
   }
@@ -145,7 +154,7 @@ if (unsuspendCurrentBtn) {
         await sendMessage('RESUME_TAB', { tabId: currentSuspendedTabId })
       );
       if (interpreted.ok !== true) {
-        statusEl.textContent = getActionFailureMessage('Failed to unsuspend tab.', interpreted);
+        presentActionFailure('Failed to unsuspend tab.', interpreted);
         return;
       }
       window.close();
@@ -222,7 +231,7 @@ async function handleUnsuspend(tabId, windowId) {
   try {
     const interpreted = interpretActionResult(await sendMessage('RESUME_TAB', { tabId }));
     if (interpreted.ok !== true) {
-      statusEl.textContent = getActionFailureMessage('Failed to unsuspend tab.', interpreted);
+      presentActionFailure('Failed to unsuspend tab.', interpreted);
       return;
     }
     await chrome.tabs.update(tabId, { active: true });
