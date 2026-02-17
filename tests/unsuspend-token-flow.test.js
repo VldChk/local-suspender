@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { processUnsuspendTokenMessage } from './unsuspend-token-flow.js';
+import { processUnsuspendTokenMessage } from '../extension/unsuspend-token-flow.js';
 
 function createHarness({
   initialState,

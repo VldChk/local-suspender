@@ -75,7 +75,11 @@ export async function processUnsuspendTokenMessage({
     if (!state) {
       return lockedMutationResponse();
     }
-    delete state.suspendedTabs?.[tabId];
+    const entry = state.suspendedTabs?.[tabId];
+    if (!entry || entry.token !== token) {
+      return { ok: false, error: 'invalid-token' };
+    }
+    delete state.suspendedTabs[tabId];
     await saveState(state);
     return { ok: true };
   });
