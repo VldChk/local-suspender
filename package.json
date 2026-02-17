@@ -1,0 +1,32 @@
+{
+  "name": "local-suspender",
+  "version": "1.0.0",
+  "description": "Manifest V3 Chrome extension that suspends inactive tabs locally with encrypted session storage.",
+  "scripts": {
+    "lint": "eslint extension --ext .js",
+    "package": "node scripts/package-extension.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VldChk/local-suspender.git"
+  },
+  "keywords": [
+    "chrome",
+    "extension",
+    "privacy",
+    "offline",
+    "tabs"
+  ],
+  "author": "VldChk",
+  "license": "MIT",
+  "devDependencies": {
+    "@eslint/js": "^9.12.0",
+    "eslint": "^9.39.1",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.11.0",
+    "yazl": "^3.3.1"
+  },
+  "overrides": {
+    "js-yaml": "^4.1.1"
+  }
+}

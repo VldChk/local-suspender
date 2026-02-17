@@ -1,0 +1,138 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>Local Suspender - Options</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+
+<body>
+  <div class="container">
+    <header>
+      <h1>Local Suspender</h1>
+    </header>
+
+    <main>
+      <form id="settingsForm">
+        <!-- General Settings Card -->
+        <div class="card">
+          <h2>General Settings</h2>
+
+          <div class="form-group">
+            <label for="autoMinutes">Auto-suspend after (minutes)</label>
+            <input type="number" id="autoMinutes" min="1" step="1" class="form-input" />
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="excludeActive" />
+              <span>Never suspend active tab</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="excludePinned" />
+              <span>Never suspend pinned tabs</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="excludeAudible" />
+              <span>Never suspend audible tabs</span>
+            </label>
+          </div>
+
+          <div class="form-group">
+            <label for="unsuspendMethod">Unsuspend behaviour</label>
+            <select id="unsuspendMethod" class="form-select">
+              <option value="activate">Automatically when tab is focused</option>
+              <option value="manual">Manually when clicking inside the tab</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="whitelist">Never suspend these URL patterns (one per line)</label>
+            <textarea id="whitelist" rows="4" class="form-textarea" placeholder="https://mail.google.com/*"></textarea>
+          </div>
+        </div>
+
+        <!-- Data & Privacy Card -->
+        <div class="card">
+          <h2>Data & Privacy</h2>
+          <p class="card-description">
+            Your session history is encrypted locally. You can optionally set a passphrase for extra security.
+          </p>
+
+          <div id="encryptionStatus" class="status-indicator"></div>
+
+          <div class="form-group checkbox-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cloudBackup" />
+              <span>Back up encryption key to Chrome Sync</span>
+            </label>
+            <p id="cloudWarning" class="hint hidden">Cloud backup requires a passkey-protected key.</p>
+          </div>
+
+          <div class="form-group checkbox-group">
+            <label class="checkbox-label">
+              <input type="checkbox" id="embedOriginalUrl" />
+              <span>Embed original URL in suspended page for recovery (recommended)</span>
+            </label>
+            <p class="hint">Disabling hides URLs from history but prevents recovery if the extension is disabled.</p>
+          </div>
+
+          <!-- Locked State -->
+          <div id="lockedPanel" class="panel hidden">
+            <p class="hint">Enter your passkey to unlock and access your history.</p>
+            <div class="input-group">
+              <input type="password" id="unlockPassphrase" placeholder="Passkey to unlock"
+                autocomplete="current-password" class="form-input" />
+              <button type="button" id="unlockBtn" class="btn btn-primary">Unlock</button>
+            </div>
+            <button type="button" id="retryImportBtn" class="btn btn-secondary hidden">Retry key import</button>
+          </div>
+
+          <!-- Unlocked State -->
+          <div id="unlockedPanel" class="panel">
+            <div class="input-group">
+              <input type="password" id="passphrase" placeholder="Set a passphrase (optional)"
+                autocomplete="current-password" class="form-input" />
+              <button type="button" id="setPassphraseBtn" class="btn btn-primary">Set Passphrase</button>
+              <button type="button" id="removePassphraseBtn" class="btn btn-danger hidden">Remove Passphrase</button>
+            </div>
+          </div>
+
+          <p class="hint" id="encryptionHint"></p>
+
+          <div class="form-actions">
+            <button type="button" id="resetEncryptionBtn" class="btn btn-danger-outline">Reset encrypted data</button>
+          </div>
+        </div>
+
+        <!-- Session History Card -->
+        <div class="card">
+          <h2>Session History</h2>
+          <p class="card-description">
+            Encrypted snapshots of your suspended tabs are saved automatically.
+          </p>
+          <ul id="snapshotList" class="snapshot-list"></ul>
+        </div>
+
+        <!-- Advanced / Debug Card -->
+        <div class="card">
+          <h2>Advanced</h2>
+          <div class="form-actions">
+            <button type="button" id="downloadLogs" class="btn btn-secondary">Download Debug Logs</button>
+            <button type="button" id="clearLogs" class="btn btn-secondary">Clear Logs</button>
+          </div>
+        </div>
+
+        <!-- Sticky Footer for Save -->
+        <div class="sticky-footer">
+          <p id="status" role="status"></p>
+          <button type="submit" class="btn btn-primary btn-large">Save Settings</button>
+        </div>
+      </form>
+    </main>
+  </div>
+  <script type="module" src="options.js"></script>
+</body>
+
+</html>
