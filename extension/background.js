@@ -404,17 +404,7 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
     return { ok: true, opened: 0 };
   }
 
-  const win = await chrome.windows.create({ url: 'about:blank', focused: true });
-  const windowId = win.id;
-  const tabs = win.tabs || [];
-  let firstTabId = tabs[0]?.id || null;
-  let firstTabUsed = false;
-  let opened = 0;
-  const settings = await ensureSettings();
-  const embedOriginalUrl = settings.embedOriginalUrl !== false;
-
   const seenUrls = new Set();
-  const pendingStateEntries = [];
   const existingUrls = new Set();
   if (!unsuspend) {
     await withStateLock(async () => {
@@ -427,15 +417,39 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
     });
   }
 
+  const filteredEntries = [];
   for (const entry of entries) {
-    if (!isSafeUrl(entry.url)) continue;
+    const parsedEntry = {
+      url: entry?.url,
+      title: entry?.title,
+      favIconUrl: entry?.favIconUrl,
+    };
+    if (!isSafeUrl(parsedEntry.url)) continue;
     if (!unsuspend) {
-      const urlKey = entry.url;
+      const urlKey = parsedEntry.url;
       if (existingUrls.has(urlKey) || seenUrls.has(urlKey)) {
         continue; // Avoid duplicates in state and tabs
       }
       seenUrls.add(urlKey);
     }
+    filteredEntries.push(parsedEntry);
+  }
+
+  if (!filteredEntries.length) {
+    return { ok: true, opened: 0 };
+  }
+
+  const win = await chrome.windows.create({ url: 'about:blank', focused: true });
+  const windowId = win.id;
+  const tabs = win.tabs || [];
+  let firstTabId = tabs[0]?.id || null;
+  let firstTabUsed = false;
+  let opened = 0;
+  const settings = await ensureSettings();
+  const embedOriginalUrl = settings.embedOriginalUrl !== false;
+  const pendingStateEntries = [];
+
+  for (const entry of filteredEntries) {
     let urlToOpen;
     let isSuspended = false;
     let token = null;
