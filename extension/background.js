@@ -1081,7 +1081,7 @@ async function autoSuspendTick() {
 
 function getSuspendSafetySkipReason(tab) {
   if (!tab || !tab.id) {
-    return null;
+    return 'unsafe-url';
   }
   if (tab.incognito) {
     return 'incognito';
