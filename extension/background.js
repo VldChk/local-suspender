@@ -31,6 +31,7 @@ const AUTO_SUSPEND_BATCH_LIMIT = 5;
 const ALARM_PERIOD_DIVISOR = 3;
 const MAX_ALARM_PERIOD_MINUTES = 60;
 const STATE_VALIDATION_THROTTLE_MS = 60 * 1000;
+const VALIDATION_DEBOUNCE_MS = 250;
 const LAST_ACTIVE_FLUSH_DELAY_MS = 3000;
 const SNAPSHOT_DETAILS_CACHE_LIMIT = 10;
 
@@ -38,8 +39,10 @@ let cachedState = null;
 let lastActiveCache = {};
 let initError = null;
 let stateCorruptionReason = null;
-let validationTimer = null;
+let validationDebounceTimer = null;
 let validationRunning = false;
+// In-memory throttle gate. It intentionally resets on worker restart so the first
+// opportunistic request after wake-up can validate immediately.
 let nextValidationAllowedAt = 0;
 let whitelistRegexCacheKey = '';
 let whitelistRegexCache = [];
@@ -157,12 +160,14 @@ function setSnapshotDetailsCache(snapshotId, tabsMap) {
 }
 
 async function runStateValidationNow(trigger = 'scheduled') {
+  // Invariant: only one validation run at a time, with writes serialized by stateLock.
+  // Throttle windows are enforced by callers and updated in finally for deterministic pacing.
   if (validationRunning) {
     return;
   }
-  if (validationTimer) {
-    clearTimeout(validationTimer);
-    validationTimer = null;
+  if (validationDebounceTimer) {
+    clearTimeout(validationDebounceTimer);
+    validationDebounceTimer = null;
   }
   validationRunning = true;
   try {
@@ -182,14 +187,20 @@ async function runStateValidationNow(trigger = 'scheduled') {
 }
 
 function maybeScheduleValidation(trigger = 'get-state') {
-  if (validationRunning || validationTimer) {
+  // Primary scheduler is chrome.alarms (durable across MV3 worker suspension).
+  // This helper is only a short-lived debounce for opportunistic validation requests.
+  // The in-memory throttle may reset on worker restart; that's intentional so the
+  // next GET_STATE can safely trigger a fresh validation quickly.
+  if (validationRunning || validationDebounceTimer) {
     return;
   }
-  const delay = Math.max(0, nextValidationAllowedAt - Date.now());
-  validationTimer = setTimeout(() => {
-    validationTimer = null;
+  if (Date.now() < nextValidationAllowedAt) {
+    return;
+  }
+  validationDebounceTimer = setTimeout(() => {
+    validationDebounceTimer = null;
     void runStateValidationNow(trigger);
-  }, delay);
+  }, VALIDATION_DEBOUNCE_MS);
 }
 
 function buildWhitelistCacheKey(whitelist) {
@@ -1264,7 +1275,8 @@ async function scheduleAutoSuspendAlarm() {
 }
 
 async function scheduleStateValidationAlarm() {
-  // Run every 15 minutes to keep state clean
+  // Durable scheduler for validation cadence. Opportunistic requests may run sooner,
+  // but we rely on this alarm for long-lived timing across service worker restarts.
   await chrome.alarms.clear('stateValidator');
   await chrome.alarms.create('stateValidator', {
     periodInMinutes: 15,
@@ -1632,6 +1644,8 @@ function handleMessage(message, sender, sendResponse) {
           sendResponse({ ok: false, locked: true, reason: stateLockReason() });
           break;
         }
+        // Safe opportunistic validation: no long delay timer here, just a short debounce.
+        // If throttled, the durable stateValidator alarm will perform the next run.
         maybeScheduleValidation('get-state');
         sendResponse({ ok: true, locked: false, state });
         break;
