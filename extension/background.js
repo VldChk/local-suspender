@@ -41,6 +41,8 @@ let initError = null;
 let stateCorruptionReason = null;
 let validationDebounceTimer = null;
 let validationRunning = false;
+// In-memory throttle gate. It intentionally resets on worker restart so the first
+// opportunistic request after wake-up can validate immediately.
 let nextValidationAllowedAt = 0;
 let whitelistRegexCacheKey = '';
 let whitelistRegexCache = [];
@@ -187,6 +189,8 @@ async function runStateValidationNow(trigger = 'scheduled') {
 function maybeScheduleValidation(trigger = 'get-state') {
   // Primary scheduler is chrome.alarms (durable across MV3 worker suspension).
   // This helper is only a short-lived debounce for opportunistic validation requests.
+  // The in-memory throttle may reset on worker restart; that's intentional so the
+  // next GET_STATE can safely trigger a fresh validation quickly.
   if (validationRunning || validationDebounceTimer) {
     return;
   }
