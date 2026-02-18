@@ -42,24 +42,40 @@ if (faviconParam) {
 }
 
 
+function canGrayscaleLocally(url) {
+  if (!url || typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    return ['data:', 'chrome:', 'chrome-extension:'].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
 function updateFavicon(url) {
   if (!isSafeFaviconUrl(url)) return;
-  const link = document.querySelector("link[rel~='icon']") || document.createElement('link');
-  link.type = 'image/x-icon';
-  link.rel = 'icon';
+  let link = document.querySelector("link[rel~='icon']");
+  if (!link) {
+    link = document.createElement('link');
+    link.type = 'image/x-icon';
+    link.rel = 'icon';
+    document.head.appendChild(link);
+  }
   link.href = url;
-  document.getElementsByTagName('head')[0].appendChild(link);
 
   const logoEl = document.getElementById('siteLogo');
   if (logoEl) {
     logoEl.src = url;
   }
 
-  getGrayscaleFavicon(url).then(grayUrl => {
-    if (grayUrl) {
-      link.href = grayUrl;
-    }
-  }).catch(err => console.warn('Failed to generate grayscale favicon', err));
+  // Only attempt grayscale for local/data URLs to avoid network requests
+  if (canGrayscaleLocally(url)) {
+    getGrayscaleFavicon(url).then(grayUrl => {
+      if (grayUrl) {
+        link.href = grayUrl;
+      }
+    }).catch(err => console.warn('Failed to generate grayscale favicon', err));
+  }
 }
 
 function getGrayscaleFavicon(url) {

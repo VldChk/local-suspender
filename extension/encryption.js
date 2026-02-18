@@ -96,14 +96,15 @@ export async function wrapDataKey(passkey) {
   const settings = await ensureSettings();
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const wrappingKey = await deriveWrappingKey(passkey, salt, settings.encryption.iterations);
+  const effectiveIterations = Math.max(settings.encryption.iterations || MIN_ITERATIONS, MIN_ITERATIONS);
+  const wrappingKey = await deriveWrappingKey(passkey, salt, effectiveIterations);
   const raw = await crypto.subtle.exportKey('raw', cryptoKey);
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, wrappingKey, raw);
   return {
     encryptedKey: bufferToBase64(encrypted),
     keySalt: bufferToBase64(salt),
     keyIV: bufferToBase64(iv),
-    iterations: settings.encryption.iterations,
+    iterations: effectiveIterations,
   };
 }
 
@@ -363,12 +364,37 @@ export async function unlockWithPasskey(passkey) {
   }
   try {
     await unwrapDataKey(passkey, record);
-    return { ok: true };
   } catch (err) {
     Logger.warn('Passkey unlock failed', err);
     markEncryptionLocked('bad-passkey');
     return { ok: false, error: 'bad-passkey' };
   }
+
+  // Upgrade weak PBKDF2 iteration count after successful unwrap
+  const recordIterations = record.iterations || settings.encryption.iterations;
+  if (recordIterations < MIN_ITERATIONS) {
+    try {
+      Logger.info('Upgrading PBKDF2 iterations', {
+        from: recordIterations,
+        to: Math.max(settings.encryption.iterations, MIN_ITERATIONS),
+      });
+      const wrapped = await wrapDataKey(passkey);
+      const upgraded = {
+        ...record,
+        encryptedKey: wrapped.encryptedKey,
+        keySalt: wrapped.keySalt,
+        keyIV: wrapped.keyIV,
+        iterations: wrapped.iterations,
+        updatedAt: Date.now(),
+      };
+      await persistKeyRecord(upgraded);
+    } catch (upgradeErr) {
+      // Non-fatal: key is already unwrapped and usable
+      Logger.warn('Failed to upgrade PBKDF2 iteration count', upgradeErr);
+    }
+  }
+
+  return { ok: true };
 }
 
 export async function setPasskey(passkey) {

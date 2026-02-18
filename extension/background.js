@@ -18,6 +18,7 @@ import {
 import { ensureSettings, saveSettings as persistSettings, defaultSettings, SETTINGS_KEY } from './settings.js';
 import { sessionGet, sessionSet, sessionRemove } from './session.js';
 import { encodeStateV2, decodeStateAny } from './state-codec.js';
+import { processUnsuspendTokenMessage } from './unsuspend-token-flow.js';
 
 const STATE_KEY = 'suspenderState';
 const SESSION_LAST_ACTIVE_KEY = 'lastActive';
@@ -30,6 +31,7 @@ const AUTO_SUSPEND_BATCH_LIMIT = 5;
 const ALARM_PERIOD_DIVISOR = 3;
 const MAX_ALARM_PERIOD_MINUTES = 60;
 const STATE_VALIDATION_THROTTLE_MS = 60 * 1000;
+const VALIDATION_DEBOUNCE_MS = 250;
 const LAST_ACTIVE_FLUSH_DELAY_MS = 3000;
 const SNAPSHOT_DETAILS_CACHE_LIMIT = 10;
 
@@ -37,8 +39,10 @@ let cachedState = null;
 let lastActiveCache = {};
 let initError = null;
 let stateCorruptionReason = null;
-let validationTimer = null;
+let validationDebounceTimer = null;
 let validationRunning = false;
+// In-memory throttle gate. It intentionally resets on worker restart so the first
+// opportunistic request after wake-up can validate immediately.
 let nextValidationAllowedAt = 0;
 let whitelistRegexCacheKey = '';
 let whitelistRegexCache = [];
@@ -156,12 +160,14 @@ function setSnapshotDetailsCache(snapshotId, tabsMap) {
 }
 
 async function runStateValidationNow(trigger = 'scheduled') {
+  // Invariant: only one validation run at a time, with writes serialized by stateLock.
+  // Throttle windows are enforced by callers and updated in finally for deterministic pacing.
   if (validationRunning) {
     return;
   }
-  if (validationTimer) {
-    clearTimeout(validationTimer);
-    validationTimer = null;
+  if (validationDebounceTimer) {
+    clearTimeout(validationDebounceTimer);
+    validationDebounceTimer = null;
   }
   validationRunning = true;
   try {
@@ -181,14 +187,20 @@ async function runStateValidationNow(trigger = 'scheduled') {
 }
 
 function maybeScheduleValidation(trigger = 'get-state') {
-  if (validationRunning || validationTimer) {
+  // Primary scheduler is chrome.alarms (durable across MV3 worker suspension).
+  // This helper is only a short-lived debounce for opportunistic validation requests.
+  // The in-memory throttle may reset on worker restart; that's intentional so the
+  // next GET_STATE can safely trigger a fresh validation quickly.
+  if (validationRunning || validationDebounceTimer) {
     return;
   }
-  const delay = Math.max(0, nextValidationAllowedAt - Date.now());
-  validationTimer = setTimeout(() => {
-    validationTimer = null;
+  if (Date.now() < nextValidationAllowedAt) {
+    return;
+  }
+  validationDebounceTimer = setTimeout(() => {
+    validationDebounceTimer = null;
     void runStateValidationNow(trigger);
-  }, delay);
+  }, VALIDATION_DEBOUNCE_MS);
 }
 
 function buildWhitelistCacheKey(whitelist) {
@@ -403,17 +415,7 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
     return { ok: true, opened: 0 };
   }
 
-  const win = await chrome.windows.create({ url: 'about:blank', focused: true });
-  const windowId = win.id;
-  const tabs = win.tabs || [];
-  let firstTabId = tabs[0]?.id || null;
-  let firstTabUsed = false;
-  let opened = 0;
-  const settings = await ensureSettings();
-  const embedOriginalUrl = settings.embedOriginalUrl !== false;
-
   const seenUrls = new Set();
-  const pendingStateEntries = [];
   const existingUrls = new Set();
   if (!unsuspend) {
     await withStateLock(async () => {
@@ -426,15 +428,39 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
     });
   }
 
+  const filteredEntries = [];
   for (const entry of entries) {
-    if (!isSafeUrl(entry.url)) continue;
+    const parsedEntry = {
+      url: entry?.url,
+      title: entry?.title,
+      favIconUrl: entry?.favIconUrl,
+    };
+    if (!isSafeUrl(parsedEntry.url)) continue;
     if (!unsuspend) {
-      const urlKey = entry.url;
+      const urlKey = parsedEntry.url;
       if (existingUrls.has(urlKey) || seenUrls.has(urlKey)) {
         continue; // Avoid duplicates in state and tabs
       }
       seenUrls.add(urlKey);
     }
+    filteredEntries.push(parsedEntry);
+  }
+
+  if (!filteredEntries.length) {
+    return { ok: true, opened: 0 };
+  }
+
+  const win = await chrome.windows.create({ url: 'about:blank', focused: true });
+  const windowId = win.id;
+  const tabs = win.tabs || [];
+  let firstTabId = tabs[0]?.id || null;
+  let firstTabUsed = false;
+  let opened = 0;
+  const settings = await ensureSettings();
+  const embedOriginalUrl = settings.embedOriginalUrl !== false;
+  const pendingStateEntries = [];
+
+  for (const entry of filteredEntries) {
     let urlToOpen;
     let isSuspended = false;
     let token = null;
@@ -800,6 +826,13 @@ async function validateState(state) {
       continue;
     }
 
+    // Prune entries with unsafe URLs (javascript:, data:, etc.)
+    if (!isSafeUrl(entry.url)) {
+      delete state.suspendedTabs[tabId];
+      changed = true;
+      continue;
+    }
+
     if (entry.method === 'discard') {
       if (!tab.discarded) {
         delete state.suspendedTabs[tabId];
@@ -891,17 +924,16 @@ async function handleTabUpdated(tabId, changeInfo, tab) {
       if ('discarded' in changeInfo) {
         if (changeInfo.discarded) {
           const settings = await ensureSettings();
-          if (tab.incognito || !(await shouldSuspendTab(tab, settings, Date.now()))) {
-            return;
+          if (!tab.incognito && (shouldSuspendTab(tab, settings, Date.now()))) {
+            state.suspendedTabs[tabId] = {
+              url: tab.url,
+              title: tab.title,
+              windowId: tab.windowId,
+              suspendedAt: Date.now(),
+              method: 'discard',
+            };
+            modified = true;
           }
-          state.suspendedTabs[tabId] = {
-            url: tab.url,
-            title: tab.title,
-            windowId: tab.windowId,
-            suspendedAt: Date.now(),
-            method: 'discard',
-          };
-          modified = true;
         } else if (state.suspendedTabs[tabId]?.method === 'discard') {
           delete state.suspendedTabs[tabId];
           modified = true;
@@ -986,7 +1018,7 @@ async function autoSuspendTick() {
 
   const candidates = [];
   for (const tab of tabs) {
-    if (await shouldSuspendTab(tab, settings, now)) {
+    if (shouldSuspendTab(tab, settings, now)) {
       candidates.push(tab);
     }
   }
@@ -1047,17 +1079,23 @@ async function autoSuspendTick() {
   await flushLastActiveCache();
 }
 
-async function shouldSuspendTab(tab, settings, now) {
-  if (!tab || !tab.id) return false;
+function getSuspendSafetySkipReason(tab) {
+  if (!tab || !tab.id) {
+    return 'unsafe-url';
+  }
   if (tab.incognito) {
-    return false;
+    return 'incognito';
   }
   if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
-    return false;
+    return 'unsafe-url';
   }
   if (!isSafeUrl(tab.url)) {
-    return false;
+    return 'unsafe-url';
   }
+  return null;
+}
+
+function shouldSuspendByAutoPolicy(tab, settings, now) {
   if (settings.excludeActive && tab.active) {
     return false;
   }
@@ -1076,6 +1114,10 @@ async function shouldSuspendTab(tab, settings, now) {
     return false;
   }
   return now - lastActive >= threshold;
+}
+
+function shouldSuspendTab(tab, settings, now) {
+  return getSuspendSafetySkipReason(tab) === null && shouldSuspendByAutoPolicy(tab, settings, now);
 }
 
 function buildSuspensionMetadata(tab, reason, method, extras = {}) {
@@ -1233,7 +1275,8 @@ async function scheduleAutoSuspendAlarm() {
 }
 
 async function scheduleStateValidationAlarm() {
-  // Run every 15 minutes to keep state clean
+  // Durable scheduler for validation cadence. Opportunistic requests may run sooner,
+  // but we rely on this alarm for long-lived timing across service worker restarts.
   await chrome.alarms.clear('stateValidator');
   await chrome.alarms.create('stateValidator', {
     periodInMinutes: 15,
@@ -1353,7 +1396,12 @@ async function reconcilePendingStateAfterUnlock() {
     }
 
     cachedState = merged;
-    await saveStateInternal(merged);
+    try {
+      await saveStateInternal(merged);
+    } catch (saveErr) {
+      Logger.error('Failed to re-encrypt state after unlock', saveErr);
+      markStateCorrupt('corrupt-state');
+    }
 
   } finally {
     releaseLock();
@@ -1465,20 +1513,17 @@ function handleMessage(message, sender, sendResponse) {
         }
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab) {
+          // No active tab available in current window.
           sendResponse({ ok: true, skipped: 'policy-excluded' });
           break;
         }
-        const settings = await ensureSettings();
-        if (tab.incognito) {
-          sendResponse({ ok: true, skipped: 'incognito' });
-          break;
-        }
-        if (!isSafeUrl(tab.url)) {
-          sendResponse({ ok: true, skipped: 'unsafe-url' });
-          break;
-        }
-        if (!(await shouldSuspendTab(tab, settings, Date.now()))) {
-          sendResponse({ ok: true, skipped: 'policy-excluded' });
+        // Manual current-tab suspension enforces only safety checks:
+        // - incognito => skipped: 'incognito'
+        // - unsafe/internal URL => skipped: 'unsafe-url'
+        // Auto policy rules (active/pinned/audible/whitelist/inactive threshold) do not apply here.
+        const safetySkip = getSuspendSafetySkipReason(tab);
+        if (safetySkip) {
+          sendResponse({ ok: true, skipped: safetySkip });
           break;
         }
         const result = await suspendTab(tab, 'manual');
@@ -1499,7 +1544,7 @@ function handleMessage(message, sender, sendResponse) {
         const patches = [];
         for (const tab of tabs) {
           if (tab.active) continue;
-          if (await shouldSuspendTab(tab, settings, Date.now())) {
+          if (shouldSuspendTab(tab, settings, Date.now())) {
             try {
               const result = await suspendTab(tab, 'manual', { deferStateWrite: true });
               if (result?.ok && result.patch) {
@@ -1599,6 +1644,8 @@ function handleMessage(message, sender, sendResponse) {
           sendResponse({ ok: false, locked: true, reason: stateLockReason() });
           break;
         }
+        // Safe opportunistic validation: no long delay timer here, just a short debounce.
+        // If throttled, the durable stateValidator alarm will perform the next run.
         maybeScheduleValidation('get-state');
         sendResponse({ ok: true, locked: false, state });
         break;
@@ -1629,43 +1676,21 @@ function handleMessage(message, sender, sendResponse) {
         break;
       }
       case 'UNSUSPEND_TOKEN': {
-        if (!stateIsWritable()) {
-          sendResponse(lockedMutationResponse());
-          break;
-        }
-        const { token } = message;
         const tabId = Number(message.tabId);
         if (!Number.isInteger(tabId)) {
           sendResponse({ ok: false });
           break;
         }
-        const tokenResult = await withStateLock(async () => {
-          if (!stateIsWritable()) {
-            return lockedMutationResponse();
-          }
-          const state = await loadState();
-          if (!state) {
-            return lockedMutationResponse();
-          }
-          const entry = state.suspendedTabs[tabId];
-          if (!entry || entry.token !== token) {
-            return { ok: false, error: 'invalid-token' };
-          }
-          if (entry.tokenUsed) {
-            return { ok: false, error: 'used' };
-          }
-          const issuedAt = entry.tokenIssuedAt || entry.suspendedAt;
-          if (TOKEN_TTL_MS && issuedAt && Date.now() - issuedAt > TOKEN_TTL_MS) {
-            return { ok: false, error: 'expired' };
-          }
-          entry.tokenUsed = true;
-          const resumed = await resumeSuspendedTab(tabId, entry, { focus: true });
-          if (resumed) {
-            delete state.suspendedTabs[tabId];
-            await saveState(state);
-            return { ok: true };
-          }
-          return { ok: false, error: 'resume-failed' };
+        const tokenResult = await processUnsuspendTokenMessage({
+          tabId,
+          token: message.token,
+          tokenTtlMs: TOKEN_TTL_MS,
+          stateIsWritable,
+          lockedMutationResponse,
+          withStateLock,
+          loadState,
+          saveState,
+          resumeSuspendedTab,
         });
         sendResponse(tokenResult);
         break;

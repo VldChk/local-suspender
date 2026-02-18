@@ -47,7 +47,7 @@ function setContent(parent, tag, className, text) {
 const fallbackSettings = { ...defaultSettings };
 
 let currentSettings = { ...fallbackSettings };
-
+const pendingSnapshotTimers = new Set();
 
 async function sendMessage(type, payload = {}) {
   try {
@@ -196,6 +196,10 @@ async function loadSnapshots() {
 
 
 function renderSnapshots(snapshots) {
+  for (const timerId of pendingSnapshotTimers) {
+    clearTimeout(timerId);
+  }
+  pendingSnapshotTimers.clear();
   snapshotListEl.replaceChildren();
   if (!snapshots.length) {
     setContent(snapshotListEl, 'li', 'empty-state', 'No snapshots found.');
@@ -217,12 +221,14 @@ function renderSnapshots(snapshots) {
     toggle.type = 'button';
     toggle.textContent = '+';
 
-    const date = new Date(snapshot.timestamp);
+    const timestamp = typeof snapshot.timestamp === 'number' ? snapshot.timestamp : Date.now();
+    const date = new Date(timestamp);
     const dateStr = formatSnapshotTimestamp(date);
+    const tabCount = typeof snapshot.tabCount === 'number' ? snapshot.tabCount : 0;
 
     const title = document.createElement('span');
     title.className = 'snapshot-title';
-    title.textContent = `(${dateStr}) ${snapshot.tabCount} suspended tabs`;
+    title.textContent = `(${dateStr}) ${tabCount} suspended tabs`;
 
     const actions = document.createElement('div');
     actions.className = 'snapshot-actions';
@@ -261,6 +267,7 @@ function renderSnapshots(snapshots) {
 
     let detailsLoaded = false;
     let detailsLoading = false;
+    let detailsGeneration = 0;
     let loadingTimeout;
 
     const loadDetails = async () => {
@@ -269,20 +276,27 @@ function renderSnapshots(snapshots) {
       }
       detailsLoading = true;
       detailsLoaded = false;
+      const thisGeneration = ++detailsGeneration;
 
       try {
         setContent(details, 'p', 'loading', 'Loading details...');
         loadingTimeout = setTimeout(() => {
-          if (!detailsLoaded) {
+          pendingSnapshotTimers.delete(loadingTimeout);
+          if (!detailsLoaded && thisGeneration === detailsGeneration) {
             setContent(details, 'p', 'loading', 'Still loading\u2026');
           }
         }, 2000);
+        pendingSnapshotTimers.add(loadingTimeout);
 
         const responsePromise = sendMessage('GET_SNAPSHOT_DETAILS', { snapshotId: snapshot.id });
         const response = await Promise.race([
           responsePromise,
           new Promise(resolve => setTimeout(() => resolve({ timeout: true }), 10000))
         ]);
+
+        if (thisGeneration !== detailsGeneration) {
+          return;
+        }
 
         if (response?.timeout) {
           const timeoutP = document.createElement('p');
@@ -322,6 +336,7 @@ function renderSnapshots(snapshots) {
           setContent(details, 'p', 'error', 'Failed to load details.');
         }
       } catch (err) {
+        if (thisGeneration !== detailsGeneration) return;
         console.warn('Failed to fetch snapshot details', err);
         setContent(details, 'p', 'error', 'Error loading details.');
         const retryBtn = document.createElement('button');
@@ -334,7 +349,10 @@ function renderSnapshots(snapshots) {
         details.appendChild(retryBtn);
       } finally {
         clearTimeout(loadingTimeout);
-        detailsLoading = false;
+        pendingSnapshotTimers.delete(loadingTimeout);
+        if (thisGeneration === detailsGeneration) {
+          detailsLoading = false;
+        }
       }
     };
 
