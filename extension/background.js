@@ -1068,17 +1068,23 @@ async function autoSuspendTick() {
   await flushLastActiveCache();
 }
 
-async function shouldSuspendTab(tab, settings, now) {
-  if (!tab || !tab.id) return false;
+function getSuspendSafetySkipReason(tab) {
+  if (!tab || !tab.id) {
+    return 'policy-excluded';
+  }
   if (tab.incognito) {
-    return false;
+    return 'incognito';
   }
   if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
-    return false;
+    return 'unsafe-url';
   }
   if (!isSafeUrl(tab.url)) {
-    return false;
+    return 'unsafe-url';
   }
+  return null;
+}
+
+function shouldSuspendByAutoPolicy(tab, settings, now) {
   if (settings.excludeActive && tab.active) {
     return false;
   }
@@ -1097,6 +1103,10 @@ async function shouldSuspendTab(tab, settings, now) {
     return false;
   }
   return now - lastActive >= threshold;
+}
+
+async function shouldSuspendTab(tab, settings, now) {
+  return getSuspendSafetySkipReason(tab) === null && shouldSuspendByAutoPolicy(tab, settings, now);
 }
 
 function buildSuspensionMetadata(tab, reason, method, extras = {}) {
@@ -1491,20 +1501,17 @@ function handleMessage(message, sender, sendResponse) {
         }
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab) {
+          // No active tab available in current window.
           sendResponse({ ok: true, skipped: 'policy-excluded' });
           break;
         }
-        const settings = await ensureSettings();
-        if (tab.incognito) {
-          sendResponse({ ok: true, skipped: 'incognito' });
-          break;
-        }
-        if (!isSafeUrl(tab.url)) {
-          sendResponse({ ok: true, skipped: 'unsafe-url' });
-          break;
-        }
-        if (!(await shouldSuspendTab(tab, settings, Date.now()))) {
-          sendResponse({ ok: true, skipped: 'policy-excluded' });
+        // Manual current-tab suspension enforces only safety checks:
+        // - incognito => skipped: 'incognito'
+        // - unsafe/internal URL => skipped: 'unsafe-url'
+        // Auto policy rules (active/pinned/audible/whitelist/inactive threshold) do not apply here.
+        const safetySkip = getSuspendSafetySkipReason(tab);
+        if (safetySkip) {
+          sendResponse({ ok: true, skipped: safetySkip });
           break;
         }
         const result = await suspendTab(tab, 'manual');

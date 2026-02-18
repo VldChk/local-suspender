@@ -77,7 +77,7 @@ document.getElementById('suspendCurrent').addEventListener('click', async () => 
       return;
     }
     if (interpreted.skipped === 'policy-excluded') {
-      scheduleRefresh('Skipped by current suspension policy.');
+      scheduleRefresh('Skipped: no suspendable current tab in this window.');
       return;
     }
     if (interpreted.ok === true) {
