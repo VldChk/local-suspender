@@ -10,7 +10,7 @@
 <body>
   <header>
     <h1>Local Suspender</h1>
-    <button id="openOptions" class="icon-btn" title="Options">
+    <button id="openOptions" class="icon-btn" title="Options" aria-label="Open settings">
       <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none"
         stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"></circle>
@@ -36,14 +36,14 @@
 
     <button id="unsuspendAll" class="btn btn-outline">Unsuspend all tabs</button>
 
-    <div id="status" class="status-message"></div>
+    <div id="status" class="status-message" role="status" aria-live="polite"></div>
 
     <section id="suspendedList">
-      <div class="tabs-header" id="tabsHeader">
+      <div class="tabs-header" id="tabsHeader" aria-expanded="false">
         <h2 id="tabsCount">0 suspended tabs</h2>
         <span class="toggle-icon">+</span>
       </div>
-      <ul id="tabs" class="tabs-list hidden"></ul>
+      <ul id="tabs" class="tabs-list"></ul>
     </section>
   </main>
   <script type="module" src="popup.js"></script>

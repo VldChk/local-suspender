@@ -15,6 +15,10 @@
   --radius-sm: 4px;
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  --hover-bg: #f1f5f9;
+  --hover-border: #cbd5e1;
+  --bg-subtle: #f8fafc;
+  --danger-bg-light: #fef2f2;
 }
 
 body {
@@ -127,7 +131,7 @@ h2 {
   font-size: 0.875rem;
   margin-bottom: 1rem;
   padding: 0.75rem;
-  background-color: #f1f5f9;
+  background-color: var(--hover-bg);
   border-radius: var(--radius-sm);
   text-align: center;
 }
@@ -141,6 +145,27 @@ h2 {
 .hidden {
   display: none !important;
 }
+
+:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
+/* Encryption status color states */
+.status-error    { color: var(--danger-color); }
+.status-locked   { color: #a11; }
+.status-ok       { color: var(--success-color); }
+.status-neutral  { color: var(--text-muted); }
+
+/* Reset button highlight when key is corrupted */
+.reset-highlight {
+  border: 2px solid var(--danger-color);
+  animation: pulse 2s infinite;
+}
+
+/* Status message colors */
+.status-msg-error { color: #a11; }
+.status-msg-ok    { color: var(--success-color); }
 
 .input-group {
   display: flex;
@@ -187,8 +212,8 @@ h2 {
 }
 
 .btn-secondary:hover {
-  background-color: #f8fafc;
-  border-color: #cbd5e1;
+  background-color: var(--bg-subtle);
+  border-color: var(--hover-border);
 }
 
 .btn-danger {
@@ -207,8 +232,11 @@ h2 {
 }
 
 .btn-danger-outline:hover {
-  background-color: #fef2f2;
+  background-color: var(--danger-bg-light);
 }
+
+.btn:active { transform: scale(0.97); }
+.btn-xs:active { transform: scale(0.95); }
 
 .form-actions {
   display: flex;
@@ -247,6 +275,10 @@ h2 {
   margin-top: 0.5rem;
 }
 
+.hint-warning {
+  color: #a11;
+}
+
 /* Snapshot List */
 .snapshot-list {
   list-style: none;
@@ -276,17 +308,14 @@ h2 {
 }
 
 .snapshot-header:hover {
-  background-color: #f8fafc;
+  background-color: var(--bg-subtle);
 }
 
 .snapshot-title {
   flex: 1;
   font-size: 0.875rem;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
   color: var(--text-main);
   cursor: pointer;
-  transition: all 0.15s ease;
 }
 
 .btn-xs {
@@ -296,7 +325,7 @@ h2 {
   padding: 0.2rem 0.45rem;
   font-size: 0.75rem;
   line-height: 1.2;
-  background-color: #fff;
+  background-color: var(--surface-color);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   color: var(--text-main);
@@ -304,8 +333,8 @@ h2 {
 }
 
 .btn-xs:hover {
-  background-color: #f1f5f9;
-  border-color: #cbd5e1;
+  background-color: var(--hover-bg);
+  border-color: var(--hover-border);
 }
 
 .empty-state {
@@ -340,11 +369,11 @@ h2 {
 
 /* Snapshot Details */
 .snapshot-details {
-  margin-top: 10px;
-  padding: 10px;
-  background-color: #f9f9f9;
-  border-radius: 4px;
-  border: 1px solid #eee;
+  margin-top: 0.625rem;
+  padding: 0.625rem;
+  background-color: var(--bg-subtle);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
 }
 
 .snapshot-tab-list {
@@ -356,8 +385,8 @@ h2 {
 .snapshot-tab-item {
   display: flex;
   align-items: center;
-  padding: 4px 0;
-  border-bottom: 1px solid #eee;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .snapshot-tab-item:last-child {
@@ -367,12 +396,12 @@ h2 {
 .snapshot-tab-icon {
   width: 16px;
   height: 16px;
-  margin-right: 8px;
+  margin-right: 0.5rem;
 }
 
 .snapshot-tab-link {
   text-decoration: none;
-  color: #333;
+  color: var(--text-main);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -381,18 +410,18 @@ h2 {
 
 .snapshot-tab-link:hover {
   text-decoration: underline;
-  color: #2196F3;
+  color: var(--primary-color);
 }
 
 .loading,
 .error,
 .empty {
-  color: #666;
+  color: var(--text-muted);
   font-style: italic;
   text-align: center;
-  margin: 10px 0;
+  margin: 0.625rem 0;
 }
 
 .error {
-  color: #d9534f;
+  color: var(--danger-color);
 }

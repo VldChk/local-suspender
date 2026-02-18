@@ -7,6 +7,9 @@ const actionsGroupEl = document.getElementById('actionsGroup');
 const unsuspendCurrentBtn = document.getElementById('unsuspendCurrent');
 const neverSuspendSiteBtn = document.getElementById('neverSuspendSite');
 const unsuspendAllBtn = document.getElementById('unsuspendAll');
+const toggleIconEl = tabsHeaderEl.querySelector('.toggle-icon');
+const suspendCurrentBtn = document.getElementById('suspendCurrent');
+const suspendInactiveBtn = document.getElementById('suspendInactive');
 
 let currentSuspendedTabId = null;
 let currentSuspendedUrl = null;
@@ -65,7 +68,7 @@ function presentActionFailure(defaultMessage, interpreted) {
 
 // --- Event Listeners ---
 
-document.getElementById('suspendCurrent').addEventListener('click', async () => {
+suspendCurrentBtn.addEventListener('click', async () => {
   try {
     const interpreted = interpretActionResult(await sendMessage('SUSPEND_CURRENT'));
     if (interpreted.skipped === 'incognito') {
@@ -90,7 +93,7 @@ document.getElementById('suspendCurrent').addEventListener('click', async () => 
   }
 });
 
-document.getElementById('suspendInactive').addEventListener('click', async () => {
+suspendInactiveBtn.addEventListener('click', async () => {
   try {
     const interpreted = interpretActionResult(await sendMessage('SUSPEND_INACTIVE'));
     if (interpreted.ok === true) {
@@ -103,7 +106,7 @@ document.getElementById('suspendInactive').addEventListener('click', async () =>
   }
 });
 
-document.getElementById('unsuspendAll').addEventListener('click', async () => {
+unsuspendAllBtn.addEventListener('click', async () => {
   try {
     const interpreted = interpretActionResult(await sendMessage('RESUME_ALL'));
     if (interpreted.ok === true) {
@@ -122,9 +125,10 @@ document.getElementById('openOptions').addEventListener('click', (e) => {
 });
 
 tabsHeaderEl.addEventListener('click', () => {
-  const icon = tabsHeaderEl.querySelector('.toggle-icon');
-  tabsListEl.classList.toggle('hidden');
-  icon.textContent = tabsListEl.classList.contains('hidden') ? '+' : '-';
+  tabsListEl.classList.toggle('expanded');
+  const isExpanded = tabsListEl.classList.contains('expanded');
+  toggleIconEl.textContent = isExpanded ? '-' : '+';
+  tabsHeaderEl.setAttribute('aria-expanded', isExpanded);
 });
 
 tabsListEl.addEventListener('click', async (event) => {
@@ -186,13 +190,8 @@ if (neverSuspendSiteBtn) {
         statusEl.textContent = 'Failed to save whitelist changes.';
         return;
       }
-      scheduleRefresh(`Added "${domain}" to whitelist and unsuspended.`);
-      tabsHeaderEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      const confirmation = document.createElement('div');
-      confirmation.className = 'status-message';
-      confirmation.textContent = `Whitelisted: ${domain}`;
-      statusEl.parentElement?.insertBefore(confirmation, statusEl.nextSibling);
-      setTimeout(() => confirmation.remove(), 2000);
+      statusEl.textContent = `Whitelisted: ${domain}. Unsuspending.`;
+      scheduleRefresh(`Whitelisted: ${domain}. Unsuspending.`);
       // Auto-unsuspend is handled by background on SAVE_SETTINGS
       setTimeout(() => window.close(), 1000);
     }
@@ -302,16 +301,16 @@ async function checkActiveTabContext() {
         unsuspendAllBtn?.classList.add('hidden');
 
         // Disable suspend buttons since it's already suspended
-        document.getElementById('suspendCurrent').disabled = true;
-        document.getElementById('suspendInactive').disabled = true;
+        suspendCurrentBtn.disabled = true;
+        suspendInactiveBtn.disabled = true;
         return;
       }
     }
     suspendedContextEl.classList.add('hidden');
     actionsGroupEl?.classList.remove('hidden');
     unsuspendAllBtn?.classList.remove('hidden');
-    document.getElementById('suspendCurrent').disabled = false;
-    document.getElementById('suspendInactive').disabled = false;
+    suspendCurrentBtn.disabled = false;
+    suspendInactiveBtn.disabled = false;
   } catch (err) {
     console.warn('Failed to query active tab context', err);
   }
@@ -342,7 +341,7 @@ async function refreshState(message) {
   );
 
   tabsCountEl.textContent = `${entries.length} suspended tabs`;
-  tabsHeaderEl.querySelector('.toggle-icon').textContent = tabsListEl.classList.contains('hidden') ? '+' : '-';
+  toggleIconEl.textContent = tabsListEl.classList.contains('expanded') ? '-' : '+';
 
   if (!entries.length) {
     lastRenderedStateHash = 'empty';

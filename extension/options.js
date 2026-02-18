@@ -92,33 +92,32 @@ function applyEncryptionStatus(status) {
   cloudBackupEl.checked = !!status.cloudBackupEnabled;
   if (cloudWarningEl) {
     cloudWarningEl.classList.add('hidden');
-    cloudWarningEl.style.color = '#a11';
+    cloudWarningEl.classList.remove('hint-warning');
   }
   if (retryImportBtn) {
     retryImportBtn.classList.add('hidden');
   }
 
+  // Reset dynamic state classes
+  resetEncryptionBtn.classList.remove('reset-highlight');
+
   if (status.locked) {
     if (status.reason === 'corrupt-key') {
       statusDiv.textContent = 'Status: Error - Encryption key corrupted';
-      statusDiv.style.color = '#d9534f';
-      lockedPanel.style.display = 'block';
-      unlockedPanel.style.display = 'none';
+      statusDiv.className = 'status-indicator status-error';
+      lockedPanel.classList.remove('hidden');
+      unlockedPanel.classList.add('hidden');
       encryptionHintEl.textContent = 'The encryption key is corrupted or invalid. You must reset encryption to continue.';
-      // Highlight reset button
-      resetEncryptionBtn.style.border = '2px solid #d9534f';
-      resetEncryptionBtn.style.animation = 'pulse 2s infinite';
+      resetEncryptionBtn.classList.add('reset-highlight');
       if (retryImportBtn) {
         retryImportBtn.classList.remove('hidden');
       }
     } else {
       statusDiv.textContent = 'Status: Locked - passkey required';
-      statusDiv.style.color = '#a11';
-      lockedPanel.style.display = 'block';
-      unlockedPanel.style.display = 'none';
+      statusDiv.className = 'status-indicator status-locked';
+      lockedPanel.classList.remove('hidden');
+      unlockedPanel.classList.add('hidden');
       encryptionHintEl.textContent = 'Enter your passkey to unlock your data.';
-      resetEncryptionBtn.style.border = '';
-      resetEncryptionBtn.style.animation = '';
     }
     setBtn.disabled = true;
     removeBtn.disabled = true;
@@ -126,17 +125,17 @@ function applyEncryptionStatus(status) {
     return;
   }
 
-  lockedPanel.style.display = 'none';
-  unlockedPanel.style.display = 'block';
+  lockedPanel.classList.add('hidden');
+  unlockedPanel.classList.remove('hidden');
   setBtn.disabled = false;
   removeBtn.disabled = false;
 
   if (status.usingPasskey) {
     statusDiv.textContent = 'Status: Protected by Passkey';
-    statusDiv.style.color = '#2d7a2d';
+    statusDiv.className = 'status-indicator status-ok';
     passphraseEl.placeholder = 'Enter new passkey to change';
     setBtn.textContent = 'Change Passkey';
-    removeBtn.style.display = 'inline-block';
+    removeBtn.classList.remove('hidden');
     if (status.cloudBackupEnabled && status.syncEligible) {
       encryptionHintEl.textContent = 'Your passkey-wrapped data key is backed up to Chrome Sync.';
     } else {
@@ -146,15 +145,16 @@ function applyEncryptionStatus(status) {
     statusDiv.textContent = status.cloudBackupEnabled
       ? 'Status: Local-only key (cloud backup requires passkey)'
       : 'Status: Key stored locally only';
-    statusDiv.style.color = '#666';
+    statusDiv.className = 'status-indicator status-neutral';
     passphraseEl.placeholder = 'Set a passkey (optional)';
     setBtn.textContent = 'Set Passkey';
-    removeBtn.style.display = 'none';
+    removeBtn.classList.add('hidden');
     encryptionHintEl.textContent = status.cloudBackupEnabled
       ? 'Set a passkey first to enable cloud backup; the key currently stays local-only.'
       : 'Your data is encrypted locally; the key stays on this device.';
     if (status.cloudBackupEnabled && !status.usingPasskey && cloudWarningEl) {
       cloudWarningEl.textContent = 'Cloud backup requires a passkey. Set one, then enable cloud backup.';
+      cloudWarningEl.classList.add('hint-warning');
       cloudWarningEl.classList.remove('hidden');
     }
   }
@@ -220,6 +220,7 @@ function renderSnapshots(snapshots) {
     toggle.className = 'btn-xs toggle-icon';
     toggle.type = 'button';
     toggle.textContent = '+';
+    toggle.setAttribute('aria-expanded', 'false');
 
     const timestamp = typeof snapshot.timestamp === 'number' ? snapshot.timestamp : Date.now();
     const date = new Date(timestamp);
@@ -257,8 +258,7 @@ function renderSnapshots(snapshots) {
     header.appendChild(actions);
 
     const details = document.createElement('div');
-    details.className = 'snapshot-details';
-    details.style.display = 'none';
+    details.className = 'snapshot-details hidden';
     setContent(details, 'p', 'loading', 'Loading details...');
 
     li.appendChild(header);
@@ -359,8 +359,9 @@ function renderSnapshots(snapshots) {
     toggle.onclick = async (e) => {
       e.stopPropagation();
       expanded = !expanded;
-      details.style.display = expanded ? 'block' : 'none';
+      details.classList.toggle('hidden', !expanded);
       toggle.textContent = expanded ? '-' : '+';
+      toggle.setAttribute('aria-expanded', expanded);
 
       if (expanded && !detailsLoaded) {
         await loadDetails();
@@ -395,7 +396,7 @@ function renderSnapshotDetails(container, tabsMap) {
       const icon = document.createElement('img');
       icon.src = tab.favIconUrl;
       icon.className = 'snapshot-tab-icon';
-      icon.onerror = () => { icon.style.display = 'none'; };
+      icon.onerror = () => { icon.classList.add('hidden'); };
       li.appendChild(icon);
     }
 
@@ -453,7 +454,8 @@ function collectSettingsFromForm() {
 
 function showStatus(message, isError = false) {
   statusEl.textContent = message;
-  statusEl.style.color = isError ? '#a11' : '#2d7a2d';
+  statusEl.classList.toggle('status-msg-error', isError);
+  statusEl.classList.toggle('status-msg-ok', !isError);
 }
 
 form.addEventListener('submit', async event => {

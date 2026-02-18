@@ -11,6 +11,8 @@
   --radius-md: 8px;
   --radius-sm: 4px;
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --hover-bg: #f1f5f9;
+  --hover-border: #cbd5e1;
 }
 
 body {
@@ -52,7 +54,7 @@ h1 {
 }
 
 .icon-btn:hover {
-  background-color: #e2e8f0;
+  background-color: var(--border-color);
   color: var(--text-main);
 }
 
@@ -86,8 +88,8 @@ h1 {
 }
 
 .btn-secondary:hover {
-  background-color: #f1f5f9;
-  border-color: #cbd5e1;
+  background-color: var(--hover-bg);
+  border-color: var(--hover-border);
 }
 
 .btn-outline {
@@ -118,6 +120,11 @@ h1 {
 
 .hidden {
   display: none !important;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
 }
 
 .tabs-header {
@@ -151,6 +158,16 @@ h1 {
   list-style: none;
   padding: 0;
   margin: 0;
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height 0.2s ease, opacity 0.15s ease;
+}
+
+.tabs-list.expanded {
+  max-height: 300px;
+  overflow-y: auto;
+  opacity: 1;
 }
 
 .tab-item {
@@ -201,7 +218,7 @@ h1 {
 .btn-sm {
   padding: 4px 8px;
   font-size: 11px;
-  background-color: #f1f5f9;
+  background-color: var(--hover-bg);
   border: 1px solid var(--border-color);
   color: var(--text-main);
   border-radius: 3px;
@@ -209,8 +226,11 @@ h1 {
 }
 
 .btn-sm:hover {
-  background-color: #e2e8f0;
+  background-color: var(--border-color);
 }
+
+.btn:active { transform: scale(0.97); }
+.btn-sm:active { transform: scale(0.96); }
 
 #suspendedContext {
   margin-bottom: 16px;
