@@ -913,7 +913,7 @@ async function handleTabUpdated(tabId, changeInfo, tab) {
       if ('discarded' in changeInfo) {
         if (changeInfo.discarded) {
           const settings = await ensureSettings();
-          if (!tab.incognito && (await shouldSuspendTab(tab, settings, Date.now()))) {
+          if (!tab.incognito && (shouldSuspendTab(tab, settings, Date.now()))) {
             state.suspendedTabs[tabId] = {
               url: tab.url,
               title: tab.title,
@@ -1007,7 +1007,7 @@ async function autoSuspendTick() {
 
   const candidates = [];
   for (const tab of tabs) {
-    if (await shouldSuspendTab(tab, settings, now)) {
+    if (shouldSuspendTab(tab, settings, now)) {
       candidates.push(tab);
     }
   }
@@ -1070,7 +1070,7 @@ async function autoSuspendTick() {
 
 function getSuspendSafetySkipReason(tab) {
   if (!tab || !tab.id) {
-    return 'policy-excluded';
+    return null;
   }
   if (tab.incognito) {
     return 'incognito';
@@ -1105,7 +1105,7 @@ function shouldSuspendByAutoPolicy(tab, settings, now) {
   return now - lastActive >= threshold;
 }
 
-async function shouldSuspendTab(tab, settings, now) {
+function shouldSuspendTab(tab, settings, now) {
   return getSuspendSafetySkipReason(tab) === null && shouldSuspendByAutoPolicy(tab, settings, now);
 }
 
@@ -1532,7 +1532,7 @@ function handleMessage(message, sender, sendResponse) {
         const patches = [];
         for (const tab of tabs) {
           if (tab.active) continue;
-          if (await shouldSuspendTab(tab, settings, Date.now())) {
+          if (shouldSuspendTab(tab, settings, Date.now())) {
             try {
               const result = await suspendTab(tab, 'manual', { deferStateWrite: true });
               if (result?.ok && result.patch) {
