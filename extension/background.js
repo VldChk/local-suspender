@@ -913,7 +913,7 @@ async function handleTabUpdated(tabId, changeInfo, tab) {
       if ('discarded' in changeInfo) {
         if (changeInfo.discarded) {
           const settings = await ensureSettings();
-          if (!tab.incognito && (await shouldSuspendTab(tab, settings, Date.now()))) {
+          if (!tab.incognito && (shouldSuspendTab(tab, settings, Date.now()))) {
             state.suspendedTabs[tabId] = {
               url: tab.url,
               title: tab.title,
@@ -1007,7 +1007,7 @@ async function autoSuspendTick() {
 
   const candidates = [];
   for (const tab of tabs) {
-    if (await shouldSuspendTab(tab, settings, now)) {
+    if (shouldSuspendTab(tab, settings, now)) {
       candidates.push(tab);
     }
   }
@@ -1068,17 +1068,23 @@ async function autoSuspendTick() {
   await flushLastActiveCache();
 }
 
-async function shouldSuspendTab(tab, settings, now) {
-  if (!tab || !tab.id) return false;
+function getSuspendSafetySkipReason(tab) {
+  if (!tab || !tab.id) {
+    return null;
+  }
   if (tab.incognito) {
-    return false;
+    return 'incognito';
   }
   if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
-    return false;
+    return 'unsafe-url';
   }
   if (!isSafeUrl(tab.url)) {
-    return false;
+    return 'unsafe-url';
   }
+  return null;
+}
+
+function shouldSuspendByAutoPolicy(tab, settings, now) {
   if (settings.excludeActive && tab.active) {
     return false;
   }
@@ -1097,6 +1103,10 @@ async function shouldSuspendTab(tab, settings, now) {
     return false;
   }
   return now - lastActive >= threshold;
+}
+
+function shouldSuspendTab(tab, settings, now) {
+  return getSuspendSafetySkipReason(tab) === null && shouldSuspendByAutoPolicy(tab, settings, now);
 }
 
 function buildSuspensionMetadata(tab, reason, method, extras = {}) {
@@ -1491,20 +1501,17 @@ function handleMessage(message, sender, sendResponse) {
         }
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab) {
+          // No active tab available in current window.
           sendResponse({ ok: true, skipped: 'policy-excluded' });
           break;
         }
-        const settings = await ensureSettings();
-        if (tab.incognito) {
-          sendResponse({ ok: true, skipped: 'incognito' });
-          break;
-        }
-        if (!isSafeUrl(tab.url)) {
-          sendResponse({ ok: true, skipped: 'unsafe-url' });
-          break;
-        }
-        if (!(await shouldSuspendTab(tab, settings, Date.now()))) {
-          sendResponse({ ok: true, skipped: 'policy-excluded' });
+        // Manual current-tab suspension enforces only safety checks:
+        // - incognito => skipped: 'incognito'
+        // - unsafe/internal URL => skipped: 'unsafe-url'
+        // Auto policy rules (active/pinned/audible/whitelist/inactive threshold) do not apply here.
+        const safetySkip = getSuspendSafetySkipReason(tab);
+        if (safetySkip) {
+          sendResponse({ ok: true, skipped: safetySkip });
           break;
         }
         const result = await suspendTab(tab, 'manual');
@@ -1525,7 +1532,7 @@ function handleMessage(message, sender, sendResponse) {
         const patches = [];
         for (const tab of tabs) {
           if (tab.active) continue;
-          if (await shouldSuspendTab(tab, settings, Date.now())) {
+          if (shouldSuspendTab(tab, settings, Date.now())) {
             try {
               const result = await suspendTab(tab, 'manual', { deferStateWrite: true });
               if (result?.ok && result.patch) {
