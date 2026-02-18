@@ -96,14 +96,15 @@ export async function wrapDataKey(passkey) {
   const settings = await ensureSettings();
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const wrappingKey = await deriveWrappingKey(passkey, salt, settings.encryption.iterations);
+  const effectiveIterations = Math.max(settings.encryption.iterations || MIN_ITERATIONS, MIN_ITERATIONS);
+  const wrappingKey = await deriveWrappingKey(passkey, salt, effectiveIterations);
   const raw = await crypto.subtle.exportKey('raw', cryptoKey);
   const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, wrappingKey, raw);
   return {
     encryptedKey: bufferToBase64(encrypted),
     keySalt: bufferToBase64(salt),
     keyIV: bufferToBase64(iv),
-    iterations: settings.encryption.iterations,
+    iterations: effectiveIterations,
   };
 }
 
