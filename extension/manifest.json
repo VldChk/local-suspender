@@ -3,7 +3,7 @@
   "name": "Local Suspender",
   "version": "1.0.0",
   "description": "Suspend inactive tabs with encryption-first, offline-only session storage.",
-  "permissions": ["tabs", "storage", "alarms", "idle"],
+  "permissions": ["tabs", "storage", "alarms", "idle", "favicon"],
   "background": {
     "service_worker": "background.js",
     "type": "module"

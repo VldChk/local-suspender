@@ -351,7 +351,7 @@ const SnapshotService = {
       if (snapshot.data.ct && (encryptionIsLocked() || !hasCryptoKey())) {
         throw new Error('Encryption key required to restore this snapshot');
       }
-      restoredState = await getSnapshotData(snapshot);
+      restoredState = sanitizeStateFaviconUrls(await getSnapshotData(snapshot));
 
       cachedState = restoredState;
       await validateState(cachedState);
@@ -457,7 +457,6 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
   let firstTabUsed = false;
   let opened = 0;
   const settings = await ensureSettings();
-  const embedOriginalUrl = settings.embedOriginalUrl !== false;
   const pendingStateEntries = [];
 
   for (const entry of filteredEntries) {
@@ -472,10 +471,12 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
       token = crypto.randomUUID();
       const suspendedUrl = new URL(chrome.runtime.getURL('suspended.html'));
       suspendedUrl.searchParams.set('token', token);
-      if (embedOriginalUrl) {
+      if (settings.embedOriginalUrl !== false) {
         suspendedUrl.searchParams.set('url', entry.url);
         if (entry.title) suspendedUrl.searchParams.set('title', entry.title);
-        if (entry.favIconUrl) suspendedUrl.searchParams.set('favicon', entry.favIconUrl);
+      }
+      if (shouldEmbedFaviconParam(settings, entry.favIconUrl)) {
+        suspendedUrl.searchParams.set('favicon', entry.favIconUrl);
       }
 
       urlToOpen = suspendedUrl.toString();
@@ -498,7 +499,7 @@ async function openSnapshotTabs(snapshotId, { unsuspend = false } = {}) {
         metadata: {
           url: entry.url,
           title: entry.title,
-          favIconUrl: entry.favIconUrl,
+          favIconUrl: isLocalFaviconParamSafe(entry.favIconUrl) ? entry.favIconUrl : '',
           windowId,
           suspendedAt: now,
           method: 'page',
@@ -710,6 +711,35 @@ function isSafeUrl(url) {
   } catch {
     return false;
   }
+}
+
+function isLocalFaviconParamSafe(url) {
+  if (!url || typeof url !== 'string') {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'data:' || parsed.protocol === 'chrome-extension:';
+  } catch {
+    return false;
+  }
+}
+
+function shouldEmbedFaviconParam(settings, favIconUrl) {
+  return settings.embedOriginalUrl !== false && isLocalFaviconParamSafe(favIconUrl);
+}
+
+function sanitizeStateFaviconUrls(state) {
+  if (!state || typeof state !== 'object' || !state.suspendedTabs || typeof state.suspendedTabs !== 'object') {
+    return state;
+  }
+  for (const entry of Object.values(state.suspendedTabs)) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    entry.favIconUrl = isLocalFaviconParamSafe(entry.favIconUrl) ? entry.favIconUrl : '';
+  }
+  return state;
 }
 
 function wildcardToRegExp(pattern) {
@@ -1122,15 +1152,64 @@ function shouldSuspendTab(tab, settings, now) {
 
 function buildSuspensionMetadata(tab, reason, method, extras = {}) {
   return {
+    ...extras, // e.g. token fields — explicit fields below always take priority
+
     url: tab.url,
     title: tab.title,
     windowId: tab.windowId,
     suspendedAt: Date.now(),
     method,
     reason,
-    favIconUrl: tab.favIconUrl,
-    ...extras,
+    favIconUrl: isLocalFaviconParamSafe(tab.favIconUrl) ? tab.favIconUrl : '',
   };
+}
+
+const FAVICON_CAPTURE_TIMEOUT_MS = 500;
+const FAVICON_MAX_BYTES = 8192; // 8 KB raw — keeps storage manageable at 500+ suspended tabs
+
+const FAVICON_SAFE_MIMES = new Set([
+  'image/png', 'image/jpeg', 'image/gif',
+  'image/webp', 'image/x-icon', 'image/vnd.microsoft.icon', 'image/bmp',
+]);
+
+async function captureFaviconAsDataUri(pageUrl) {
+  if (!pageUrl || typeof pageUrl !== 'string') return '';
+  try {
+    const parsed = new URL(pageUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+  } catch { return ''; }
+
+  try {
+    const faviconUrl = new URL(chrome.runtime.getURL('/_favicon/'));
+    faviconUrl.searchParams.set('pageUrl', pageUrl);
+    faviconUrl.searchParams.set('size', '32');
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FAVICON_CAPTURE_TIMEOUT_MS);
+    try {
+      const response = await fetch(faviconUrl, { signal: controller.signal });
+      if (!response.ok) return '';
+
+      const blob = await response.blob();
+      if (blob.size === 0 || blob.size > FAVICON_MAX_BYTES) return '';
+
+      const normalizedType = (blob.type || '').split(';')[0].trim().toLowerCase();
+      if (!FAVICON_SAFE_MIMES.has(normalizedType)) return '';
+
+      const buffer = await blob.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      return `data:${normalizedType};base64,${btoa(binary)}`;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  } catch (err) {
+    Logger.warn('Failed to capture favicon', { error: err?.name || String(err) });
+    return '';
+  }
 }
 
 async function suspendTab(tab, reason, { deferStateWrite = false } = {}) {
@@ -1138,11 +1217,22 @@ async function suspendTab(tab, reason, { deferStateWrite = false } = {}) {
   if (blockedReason) {
     return { ok: false, locked: true, reason: blockedReason };
   }
-  const settings = await ensureSettings();
-  if (settings.unsuspendMethod === 'manual') {
-    return suspendViaPage(tab, reason, { deferStateWrite });
+
+  const [faviconDataUri, settings] = await Promise.all([
+    captureFaviconAsDataUri(tab.url),
+    ensureSettings(),
+  ]);
+  const tabWithFavicon = faviconDataUri
+    ? { ...tab, favIconUrl: faviconDataUri }
+    : tab;
+  if (tab.favIconUrl && !faviconDataUri) {
+    Logger.info('Favicon capture failed; original URL will not persist', { tabId: tab.id });
   }
-  return suspendViaDiscard(tab, reason, { deferStateWrite });
+
+  if (settings.unsuspendMethod === 'manual') {
+    return suspendViaPage(tabWithFavicon, reason, { deferStateWrite });
+  }
+  return suspendViaDiscard(tabWithFavicon, reason, { deferStateWrite });
 }
 
 async function suspendViaDiscard(tab, reason, { deferStateWrite = false } = {}) {
@@ -1191,7 +1281,6 @@ async function suspendViaDiscard(tab, reason, { deferStateWrite = false } = {}) 
 
 async function suspendViaPage(tab, reason, { deferStateWrite = false } = {}) {
   const settings = await ensureSettings();
-  const embedOriginalUrl = settings.embedOriginalUrl !== false;
 
   const token = crypto.randomUUID();
   const now = Date.now();
@@ -1202,14 +1291,14 @@ async function suspendViaPage(tab, reason, { deferStateWrite = false } = {}) {
   });
   const suspendedUrl = new URL(chrome.runtime.getURL('suspended.html'));
   suspendedUrl.searchParams.set('token', token);
-  if (embedOriginalUrl) {
+  if (settings.embedOriginalUrl !== false) {
     suspendedUrl.searchParams.set('url', tab.url);
     if (tab.title) {
       suspendedUrl.searchParams.set('title', tab.title);
     }
-    if (tab.favIconUrl) {
-      suspendedUrl.searchParams.set('favicon', tab.favIconUrl);
-    }
+  }
+  if (shouldEmbedFaviconParam(settings, tab.favIconUrl)) {
+    suspendedUrl.searchParams.set('favicon', tab.favIconUrl);
   }
 
   try {

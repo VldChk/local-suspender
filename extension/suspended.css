@@ -47,6 +47,11 @@ h1 {
   filter: grayscale(100%) opacity(0.5);
 }
 
+#siteLogo:not([src]),
+#siteLogo[src=""] {
+  display: none;
+}
+
 p {
   font-size: 14px;
 }

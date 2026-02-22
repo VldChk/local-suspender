@@ -16,6 +16,18 @@ function decodeMethod(value, fallback = 'page') {
   return fallback;
 }
 
+function normalizeFaviconUrl(value) {
+  if (typeof value !== 'string' || !value) {
+    return '';
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'data:' || parsed.protocol === 'chrome-extension:' ? value : '';
+  } catch {
+    return '';
+  }
+}
+
 function normalizeEntry(entry) {
   if (!entry || typeof entry !== 'object' || typeof entry.url !== 'string' || !entry.url) {
     return null;
@@ -31,7 +43,7 @@ function normalizeEntry(entry) {
     suspendedAt: toFiniteNumber(entry.suspendedAt, 0),
     method,
     reason: typeof entry.reason === 'string' ? entry.reason : '',
-    favIconUrl: typeof entry.favIconUrl === 'string' ? entry.favIconUrl : '',
+    favIconUrl: normalizeFaviconUrl(entry.favIconUrl),
   };
   if (method === 'page') {
     normalized.token = typeof entry.token === 'string' ? entry.token : '';
@@ -74,7 +86,7 @@ function decodeCompactState(raw) {
       suspendedAt: toFiniteNumber(tuple[4], 0),
       method,
       reason: typeof tuple[6] === 'string' ? tuple[6] : '',
-      favIconUrl: typeof tuple[10] === 'string' ? tuple[10] : '',
+      favIconUrl: normalizeFaviconUrl(tuple[10]),
     };
     if (!entry.url) {
       continue;
@@ -112,7 +124,7 @@ function encodeTuple(tabId, entry) {
     method === 'page' && typeof entry.token === 'string' ? entry.token : '',
     method === 'page' ? toFiniteNumber(entry.tokenIssuedAt, entry.suspendedAt) : 0,
     method === 'page' && entry.tokenUsed ? 1 : 0,
-    typeof entry.favIconUrl === 'string' ? entry.favIconUrl : '',
+    normalizeFaviconUrl(entry.favIconUrl),
   ];
 }
 
