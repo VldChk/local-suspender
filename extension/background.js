@@ -1033,11 +1033,14 @@ async function autoSuspendTick() {
   const tabs = await chrome.tabs.query({ windowType: 'normal' });
   const now = Date.now();
 
-  // Prune orphaned lastActiveCache entries for closed tabs
-  const validTabIds = new Set(tabs.map(t => t.id));
+  // Prune orphaned lastActiveCache entries for closed tabs.
+  // Query all tabs across every window type (popup, devtools, panel, etc.)
+  // so entries for non-normal-window tabs are also pruned.
+  const allTabs = await chrome.tabs.query({});
+  const allTabIds = new Set(allTabs.map(t => t.id));
   let pruned = false;
   for (const tabId of Object.keys(lastActiveCache)) {
-    if (!validTabIds.has(Number(tabId))) {
+    if (!allTabIds.has(Number(tabId))) {
       delete lastActiveCache[tabId];
       pruned = true;
     }
