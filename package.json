@@ -4,7 +4,9 @@
   "description": "Manifest V3 Chrome extension that suspends inactive tabs locally with encrypted session storage.",
   "scripts": {
     "lint": "eslint extension --ext .js",
-    "package": "node scripts/package-extension.mjs"
+    "test": "node --test",
+    "verify:egress": "node scripts/verify-no-egress.mjs",
+    "package": "npm run verify:egress && node scripts/package-extension.mjs"
   },
   "repository": {
     "type": "git",

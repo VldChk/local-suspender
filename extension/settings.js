@@ -11,11 +11,21 @@ export const defaultSettings = {
   encryption: {
     enabled: true,
     iterations: 600000,
-    cloudBackupEnabled: false,
   },
 };
 
 let cachedSettings = null;
+
+// ABSOLUTELY-LOCAL: allowlist, not spread. A settings blob written by the upstream
+// build carries extra key-escrow flags; spreading would preserve them, leaving
+// live-looking remote-backup state in storage for an auditor to trip over.
+// Naming the fields we accept drops everything else on first read.
+function normalizeEncryption(source) {
+  return {
+    enabled: true,
+    iterations: source?.iterations ?? defaultSettings.encryption.iterations,
+  };
+}
 
 export async function ensureSettings() {
   if (cachedSettings) {
@@ -24,20 +34,14 @@ export async function ensureSettings() {
   const stored = await chrome.storage.local.get(SETTINGS_KEY);
   if (!stored[SETTINGS_KEY]) {
     cachedSettings = { ...defaultSettings };
-    await chrome.storage.local.set({ [SETTINGS_KEY]: cachedSettings });
   } else {
     cachedSettings = {
       ...defaultSettings,
       ...stored[SETTINGS_KEY],
-      encryption: {
-        ...defaultSettings.encryption,
-        ...(stored[SETTINGS_KEY].encryption || {}),
-        enabled: true,
-        cloudBackupEnabled: stored[SETTINGS_KEY].encryption?.cloudBackupEnabled ?? defaultSettings.encryption.cloudBackupEnabled,
-      },
+      encryption: normalizeEncryption(stored[SETTINGS_KEY].encryption),
     };
-    await chrome.storage.local.set({ [SETTINGS_KEY]: cachedSettings });
   }
+  await chrome.storage.local.set({ [SETTINGS_KEY]: cachedSettings });
   return cachedSettings;
 }
 
@@ -45,12 +49,7 @@ export async function saveSettings(nextSettings) {
   cachedSettings = {
     ...defaultSettings,
     ...nextSettings,
-    encryption: {
-      ...defaultSettings.encryption,
-      ...(nextSettings.encryption || {}),
-      enabled: true,
-      cloudBackupEnabled: nextSettings.encryption?.cloudBackupEnabled ?? defaultSettings.encryption.cloudBackupEnabled,
-    },
+    encryption: normalizeEncryption(nextSettings.encryption),
   };
   await chrome.storage.local.set({ [SETTINGS_KEY]: cachedSettings });
 }

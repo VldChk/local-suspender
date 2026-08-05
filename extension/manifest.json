@@ -2,8 +2,11 @@
   "manifest_version": 3,
   "name": "Local Suspender",
   "version": "1.0.0",
-  "description": "Suspend inactive tabs with encryption-first, offline-only session storage.",
+  "description": "Suspend inactive tabs with encrypted, device-local session storage. Zero network egress.",
   "permissions": ["tabs", "storage", "alarms", "idle", "favicon"],
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self'; object-src 'none'; connect-src 'self'; img-src 'self' data:; style-src 'self'; font-src 'self'; media-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'self'; base-uri 'none'; form-action 'none'"
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"

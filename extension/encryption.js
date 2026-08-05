@@ -1,5 +1,5 @@
 import Logger from './logger.js';
-import { ensureSettings, defaultSettings, saveSettings } from './settings.js';
+import { ensureSettings, defaultSettings } from './settings.js';
 import { sessionGet, sessionSet, sessionRemove } from './session.js';
 
 export const KEY_RECORD_KEY = 'encryptionKeyRecord';
@@ -178,61 +178,51 @@ export async function clearSessionKey() {
   await sessionRemove('cryptoKey');
 }
 
+// ABSOLUTELY-LOCAL: the key record never leaves this device. The local storage area
+// is the only backing store; the synced storage area would replicate key material to
+// Google servers, which is the single byte of egress this build exists to eliminate.
+// Failures deliberately propagate. Swallowing them lets setPasskey() report success
+// while the wrapped key was never written — the user believes their history is
+// passkey-protected when it is not, and only discovers otherwise after a restart.
+// A security boundary must not report success it cannot substantiate.
 export async function persistKeyRecord(record) {
-  const syncEligible = !!record?.cloudBackupEnabled && !!record?.usingPasskey;
-  const payload = { [KEY_RECORD_KEY]: record };
-  if (syncEligible) {
-    try {
-      await chrome.storage.sync.set(payload);
-    } catch (err) {
-      Logger.warn('Failed to persist key record to sync', err);
-    }
-  } else {
-    try {
-      await chrome.storage.sync.remove(KEY_RECORD_KEY);
-    } catch (err) {
-      Logger.warn('Failed to remove key record from sync', err);
-    }
-  }
-
-  try {
-    await chrome.storage.local.set(payload);
-  } catch (err) {
-    Logger.warn('Failed to persist key record locally', err);
-  }
-
-  return {
-    syncEligible,
-    syncBlockedReason: record?.cloudBackupEnabled && !syncEligible ? 'passkey-required' : null,
-  };
+  await chrome.storage.local.set({ [KEY_RECORD_KEY]: record });
 }
 
-export async function loadKeyRecord(preferCloud = true) {
-  let syncRecord = null;
-  let localRecord = null;
-  try {
-    const syncStored = await chrome.storage.sync.get(KEY_RECORD_KEY);
-    syncRecord = syncStored[KEY_RECORD_KEY] || null;
-  } catch (err) {
-    Logger.warn('Failed to read key record from sync', err);
-  }
+// Allowlist on read, mirroring settings.js. A key record written by the upstream
+// build carries escrow flags; callers that rebuild a record via spread (the PBKDF2
+// iteration upgrade in unlockWithPasskey) would otherwise re-persist them, leaving
+// live-looking remote-backup state sitting next to key material in local storage.
+// Normalizing here cleans every consumer, since they all read through this function.
+const KEY_RECORD_FIELDS = [
+  'usingPasskey', 'dataKey', 'encryptedKey', 'keySalt',
+  'keyIV', 'iterations', 'keyVersion', 'updatedAt',
+];
 
+function normalizeKeyRecord(record) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+  const clean = {};
+  for (const field of KEY_RECORD_FIELDS) {
+    if (record[field] !== undefined) {
+      clean[field] = record[field];
+    }
+  }
+  return clean;
+}
+
+export async function loadKeyRecord() {
   try {
     const localStored = await chrome.storage.local.get(KEY_RECORD_KEY);
-    localRecord = localStored[KEY_RECORD_KEY] || null;
+    return normalizeKeyRecord(localStored[KEY_RECORD_KEY]);
   } catch (err) {
     Logger.warn('Failed to read key record from local storage', err);
+    return null;
   }
-
-  return preferCloud ? (syncRecord || localRecord) : (localRecord || syncRecord);
 }
 
 export async function clearKeyRecords() {
-  try {
-    await chrome.storage.sync.remove(KEY_RECORD_KEY);
-  } catch (err) {
-    Logger.warn('Failed to clear key record from sync', err);
-  }
   try {
     await chrome.storage.local.remove(KEY_RECORD_KEY);
   } catch (err) {
@@ -240,36 +230,23 @@ export async function clearKeyRecords() {
   }
 }
 
-export async function generateAndPersistDataKey(cloudBackupEnabled) {
-  const requestedCloudBackup = !!cloudBackupEnabled;
+// Generated once, on this device, at install. Never transmitted, never escrowed.
+// If the extension is uninstalled the key is gone and suspended tabs are
+// unrecoverable — an accepted trade for zero egress.
+export async function generateAndPersistDataKey() {
   cryptoKey = await generateDataKey();
   const b64 = await exportKeyBase64(cryptoKey);
   const record = {
     usingPasskey: false,
     dataKey: b64,
-    cloudBackupEnabled: false,
     keyVersion: KEY_VERSION,
     updatedAt: Date.now(),
   };
   await persistKeyRecord(record);
-  if (requestedCloudBackup) {
-    const settings = await ensureSettings();
-    if (settings.encryption.cloudBackupEnabled) {
-      const nextSettings = {
-        ...settings,
-        encryption: {
-          ...settings.encryption,
-          cloudBackupEnabled: false,
-        },
-      };
-      await saveSettings(nextSettings);
-    }
-    Logger.warn('Cloud backup requires passkey-wrapped key; keeping key local only');
-  }
   await saveKeyToSession(cryptoKey);
   encryptionLocked = false;
   encryptionLockReason = null;
-  Logger.info('Generated new data key', { cloudBackupEnabled: false });
+  Logger.info('Generated new device-local data key');
   return record;
 }
 
@@ -279,8 +256,7 @@ export function markEncryptionLocked(reason = null) {
 }
 
 export async function retryImportPlaintextKey() {
-  const settings = await ensureSettings();
-  const record = await loadKeyRecord(settings.encryption.cloudBackupEnabled);
+  const record = await loadKeyRecord();
   if (!record || record.usingPasskey || !record.dataKey) {
     return { ok: false, error: 'no-plaintext-record' };
   }
@@ -298,8 +274,6 @@ export async function retryImportPlaintextKey() {
 }
 
 export async function initializeEncryption() {
-  let settings = await ensureSettings();
-
   if (!cryptoKey) {
     await restoreKeyFromSession();
   }
@@ -309,9 +283,9 @@ export async function initializeEncryption() {
     return;
   }
 
-  const record = await loadKeyRecord(settings.encryption.cloudBackupEnabled);
+  const record = await loadKeyRecord();
   if (!record) {
-    await generateAndPersistDataKey(settings.encryption.cloudBackupEnabled);
+    await generateAndPersistDataKey();
     return;
   }
 
@@ -330,21 +304,6 @@ export async function initializeEncryption() {
       encryptionLocked = false;
       encryptionLockReason = null;
       await saveKeyToSession(cryptoKey);
-      if (settings.encryption.cloudBackupEnabled) {
-        const nextSettings = {
-          ...settings,
-          encryption: {
-            ...settings.encryption,
-            cloudBackupEnabled: false,
-          },
-        };
-        await saveSettings(nextSettings);
-        settings = nextSettings;
-      }
-      if (record.cloudBackupEnabled) {
-        record.cloudBackupEnabled = false;
-        await persistKeyRecord(record);
-      }
       return;
     } catch (err) {
       Logger.warn('Failed to import plaintext data key', err);
@@ -358,7 +317,7 @@ export async function initializeEncryption() {
 
 export async function unlockWithPasskey(passkey) {
   const settings = await ensureSettings();
-  const record = await loadKeyRecord(settings.encryption.cloudBackupEnabled);
+  const record = await loadKeyRecord();
   if (!record || !record.usingPasskey) {
     return { ok: false, error: 'not-locked' };
   }
@@ -404,7 +363,6 @@ export async function setPasskey(passkey) {
   if (encryptionLocked || !cryptoKey) {
     return { ok: false, error: 'locked' };
   }
-  const settings = await ensureSettings();
   const wrapped = await wrapDataKey(passkey);
   const record = {
     usingPasskey: true,
@@ -412,11 +370,15 @@ export async function setPasskey(passkey) {
     keySalt: wrapped.keySalt,
     keyIV: wrapped.keyIV,
     iterations: wrapped.iterations,
-    cloudBackupEnabled: settings.encryption.cloudBackupEnabled,
     keyVersion: KEY_VERSION,
     updatedAt: Date.now(),
   };
-  await persistKeyRecord(record);
+  try {
+    await persistKeyRecord(record);
+  } catch (err) {
+    Logger.error('Failed to persist passkey-wrapped key record', err);
+    return { ok: false, error: 'persist-failed' };
+  }
   return { ok: true };
 }
 
@@ -424,81 +386,28 @@ export async function removePasskey() {
   if (encryptionLocked || !cryptoKey) {
     return { ok: false, error: 'locked' };
   }
-  const settings = await ensureSettings();
-  let cloudBackupEnabled = !!settings.encryption.cloudBackupEnabled;
-  if (cloudBackupEnabled) {
-    cloudBackupEnabled = false;
-    const nextSettings = {
-      ...settings,
-      encryption: {
-        ...settings.encryption,
-        cloudBackupEnabled: false,
-      },
-    };
-    await saveSettings(nextSettings);
-  }
   const b64 = await exportKeyBase64(cryptoKey);
   const record = {
     usingPasskey: false,
     dataKey: b64,
-    cloudBackupEnabled,
     keyVersion: KEY_VERSION,
     updatedAt: Date.now(),
   };
-  await persistKeyRecord(record);
-  return { ok: true };
-}
-
-export async function setCloudBackupEnabled(enabled) {
-  const settings = await ensureSettings();
-  const requested = !!enabled;
-  let record = await loadKeyRecord(requested);
-  if (!record && cryptoKey) {
-    const b64 = await exportKeyBase64(cryptoKey);
-    record = {
-      usingPasskey: false,
-      dataKey: b64,
-      cloudBackupEnabled: false,
-      keyVersion: KEY_VERSION,
-      updatedAt: Date.now(),
-    };
-  }
-
-  if (requested && (!record || !record.usingPasskey)) {
-    return { ok: false, error: 'passkey-required' };
-  }
-
-  const nextSettings = {
-    ...settings,
-    encryption: {
-      ...settings.encryption,
-      cloudBackupEnabled: requested,
-    },
-  };
-  await saveSettings(nextSettings);
-
-  if (record) {
-    record.cloudBackupEnabled = requested;
+  try {
     await persistKeyRecord(record);
-  } else if (!requested) {
-    await clearKeyRecords();
+  } catch (err) {
+    Logger.error('Failed to persist key record after passkey removal', err);
+    return { ok: false, error: 'persist-failed' };
   }
   return { ok: true };
 }
 
-export function getEncryptionStatusPayload(settings, record) {
+export function getEncryptionStatusPayload(record) {
   const locked = encryptionLocked || (!cryptoKey && record?.usingPasskey);
-  const syncEligible = !!record?.cloudBackupEnabled && !!record?.usingPasskey;
-  const syncBlockedReason = settings.encryption.cloudBackupEnabled && !syncEligible
-    ? 'passkey-required'
-    : null;
   return {
     locked,
     reason: locked ? (encryptionLockReason || (record?.usingPasskey ? 'passkey-required' : null)) : null,
     usingPasskey: !!record?.usingPasskey,
-    cloudBackupEnabled: settings.encryption.cloudBackupEnabled,
-    syncEligible,
-    syncBlockedReason,
     hasKeyRecord: !!record,
   };
 }

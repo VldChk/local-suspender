@@ -1,0 +1,12 @@
+# Dependencies are installed from package-lock.json, never vendored into the repo.
+# Committing node_modules puts thousands of unreviewed third-party files into the
+# audit surface of a project whose entire claim is "nothing leaves the device".
+node_modules/
+
+# Build artifacts are reproduced by `npm run package`. A committed zip goes stale
+# against source and misrepresents what actually ships.
+dist/
+
+# OS / editor noise
+.DS_Store
+*.swp

@@ -7,7 +7,6 @@ import {
   unlockWithPasskey as decryptWithPasskey,
   setPasskey as persistPasskey,
   removePasskey as clearPasskey,
-  setCloudBackupEnabled as updateCloudBackup,
   clearSessionKey,
   clearKeyRecords,
   generateAndPersistDataKey,
@@ -628,24 +627,9 @@ function handleStorageChanged(changes, areaName) {
 }
 
 async function saveSettings(nextSettings) {
-  const merged = {
-    ...defaultSettings,
-    ...nextSettings,
-    encryption: {
-      ...defaultSettings.encryption,
-      ...(nextSettings.encryption || {}),
-      enabled: true,
-      cloudBackupEnabled: nextSettings.encryption?.cloudBackupEnabled ?? defaultSettings.encryption.cloudBackupEnabled,
-    },
-  };
-  if (merged.encryption.cloudBackupEnabled) {
-    const record = await loadKeyRecord(true);
-    if (!record?.usingPasskey) {
-      merged.encryption.cloudBackupEnabled = false;
-      Logger.warn('Cloud backup requires passkey-wrapped key; forcing local-only setting');
-    }
-  }
-  await persistSettings(merged);
+  // persistSettings already merges against defaults and normalizes the
+  // encryption block, so there is nothing left to reconcile here.
+  await persistSettings(nextSettings);
   await scheduleAutoSuspendAlarm(); // Reschedule when settings change
 }
 
@@ -1520,8 +1504,7 @@ async function resetEncryption() {
   await chrome.storage.local.remove([STATE_KEY, 'backups']);
   await clearLegacyPendingState();
 
-  const settings = await ensureSettings();
-  await generateAndPersistDataKey(settings.encryption.cloudBackupEnabled);
+  await generateAndPersistDataKey();
   cachedState = { suspendedTabs: {} };
   await saveState(cachedState);
   return { ok: true };
@@ -1545,10 +1528,8 @@ function handleMessage(message, sender, sendResponse) {
         break;
       }
       case 'GET_ENCRYPTION_STATUS': {
-        const settings = await ensureSettings();
-        const record = await loadKeyRecord(settings.encryption.cloudBackupEnabled);
-        const payload = getEncryptionStatusPayload(settings, record);
-        sendResponse(payload);
+        const record = await loadKeyRecord();
+        sendResponse(getEncryptionStatusPayload(record));
         break;
       }
       case 'SAVE_SETTINGS': {
@@ -1585,11 +1566,6 @@ function handleMessage(message, sender, sendResponse) {
       }
       case 'REMOVE_PASSKEY': {
         const result = await clearPasskey();
-        sendResponse(result);
-        break;
-      }
-      case 'SET_CLOUD_BACKUP': {
-        const result = await updateCloudBackup(message.enabled);
         sendResponse(result);
         break;
       }

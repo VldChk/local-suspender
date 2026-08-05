@@ -7,7 +7,6 @@ const excludeAudibleEl = document.getElementById('excludeAudible');
 const whitelistEl = document.getElementById('whitelist');
 const unsuspendMethodEl = document.getElementById('unsuspendMethod');
 const passphraseEl = document.getElementById('passphrase');
-const cloudBackupEl = document.getElementById('cloudBackup');
 const embedOriginalUrlEl = document.getElementById('embedOriginalUrl');
 const unlockPassphraseEl = document.getElementById('unlockPassphrase');
 const unlockBtn = document.getElementById('unlockBtn');
@@ -17,7 +16,6 @@ const resetEncryptionBtn = document.getElementById('resetEncryptionBtn');
 const encryptionHintEl = document.getElementById('encryptionHint');
 const snapshotListEl = document.getElementById('snapshotList');
 const retryImportBtn = document.getElementById('retryImportBtn');
-const cloudWarningEl = document.getElementById('cloudWarning');
 
 import { defaultSettings } from './settings.js';
 
@@ -29,11 +27,15 @@ function isSafeDisplayUrl(url) {
   } catch { return false; }
 }
 
+// ABSOLUTELY-LOCAL: device-local schemes only. Permitting http(s) here would let a
+// snapshot entry cause the options page to fetch an image from a remote origin —
+// egress, and a browsing-history leak to that host. The manifest CSP
+// (img-src 'self' data:) blocks it regardless; this keeps the two layers agreed.
 function isSafeFaviconUrl(url) {
   if (!url || typeof url !== 'string') return false;
   try {
     const parsed = new URL(url);
-    return ['http:', 'https:', 'data:', 'chrome:', 'chrome-extension:'].includes(parsed.protocol);
+    return ['data:', 'chrome-extension:'].includes(parsed.protocol);
   } catch { return false; }
 }
 
@@ -79,7 +81,6 @@ async function loadSettings() {
   excludeAudibleEl.checked = currentSettings.excludeAudible;
   unsuspendMethodEl.value = currentSettings.unsuspendMethod;
   whitelistEl.value = (currentSettings.whitelist || []).join('\n');
-  cloudBackupEl.checked = !!currentSettings.encryption.cloudBackupEnabled;
   embedOriginalUrlEl.checked = currentSettings.embedOriginalUrl !== false;
   await refreshEncryptionStatus();
 }
@@ -89,11 +90,6 @@ function applyEncryptionStatus(status) {
   const setBtn = document.getElementById('setPassphraseBtn');
   const removeBtn = document.getElementById('removePassphraseBtn');
 
-  cloudBackupEl.checked = !!status.cloudBackupEnabled;
-  if (cloudWarningEl) {
-    cloudWarningEl.classList.add('hidden');
-    cloudWarningEl.classList.remove('hint-warning');
-  }
   if (retryImportBtn) {
     retryImportBtn.classList.add('hidden');
   }
@@ -136,30 +132,33 @@ function applyEncryptionStatus(status) {
     passphraseEl.placeholder = 'Enter new passkey to change';
     setBtn.textContent = 'Change Passkey';
     removeBtn.classList.remove('hidden');
-    if (status.cloudBackupEnabled && status.syncEligible) {
-      encryptionHintEl.textContent = 'Your passkey-wrapped data key is backed up to Chrome Sync.';
-    } else {
-      encryptionHintEl.textContent = 'Your data key is wrapped with your passkey and stored locally.';
-    }
+    encryptionHintEl.textContent = 'Your data key is wrapped with your passkey and stored only on this device.';
   } else {
-    statusDiv.textContent = status.cloudBackupEnabled
-      ? 'Status: Local-only key (cloud backup requires passkey)'
-      : 'Status: Key stored locally only';
+    statusDiv.textContent = 'Status: Key stored on this device only';
     statusDiv.className = 'status-indicator status-neutral';
     passphraseEl.placeholder = 'Set a passkey (optional)';
     setBtn.textContent = 'Set Passkey';
     removeBtn.classList.add('hidden');
-    encryptionHintEl.textContent = status.cloudBackupEnabled
-      ? 'Set a passkey first to enable cloud backup; the key currently stays local-only.'
-      : 'Your data is encrypted locally; the key stays on this device.';
-    if (status.cloudBackupEnabled && !status.usingPasskey && cloudWarningEl) {
-      cloudWarningEl.textContent = 'Cloud backup requires a passkey. Set one, then enable cloud backup.';
-      cloudWarningEl.classList.add('hint-warning');
-      cloudWarningEl.classList.remove('hidden');
-    }
+    encryptionHintEl.textContent = 'Your data is encrypted locally; the key never leaves this device.';
   }
 
   loadSnapshots();
+}
+
+// Never synthesize an unlocked/local-only result when the real status is unknown.
+// An operator running a compliance check would read "Key stored on this device only"
+// as a verified assurance, when in fact we failed to determine anything at all.
+function renderUnknownEncryptionStatus() {
+  const statusDiv = document.getElementById('encryptionStatus');
+  statusDiv.textContent = 'Status: Unavailable — could not reach the background service';
+  statusDiv.className = 'status-indicator status-error';
+  lockedPanel.classList.add('hidden');
+  unlockedPanel.classList.add('hidden');
+  document.getElementById('setPassphraseBtn').disabled = true;
+  document.getElementById('removePassphraseBtn').disabled = true;
+  retryImportBtn?.classList.add('hidden');
+  encryptionHintEl.textContent = 'Reload this page. If it persists, restart the browser.';
+  setContent(snapshotListEl, 'li', 'empty-state', 'Session history unavailable.');
 }
 
 async function refreshEncryptionStatus() {
@@ -168,13 +167,7 @@ async function refreshEncryptionStatus() {
     applyEncryptionStatus(status || {});
   } catch (err) {
     console.warn('Failed to load encryption status', err);
-    applyEncryptionStatus({
-      locked: false,
-      usingPasskey: false,
-      cloudBackupEnabled: currentSettings.encryption.cloudBackupEnabled,
-      syncEligible: false,
-      syncBlockedReason: null,
-    });
+    renderUnknownEncryptionStatus();
   }
 }
 
@@ -447,7 +440,6 @@ function collectSettingsFromForm() {
     encryption: {
       enabled: true,
       iterations: currentSettings?.encryption?.iterations || 600000,
-      cloudBackupEnabled: cloudBackupEl.checked,
     },
   };
 }
@@ -488,6 +480,8 @@ document.getElementById('setPassphraseBtn').addEventListener('click', async () =
       passphraseEl.value = '';
       await refreshEncryptionStatus();
       showStatus('Passphrase set successfully.');
+    } else if (response?.error === 'persist-failed') {
+      showStatus('Could not save the passkey — your data is NOT passkey-protected. Check available disk space and retry.', true);
     } else {
       showStatus('Failed to set passphrase.', true);
     }
@@ -507,6 +501,8 @@ document.getElementById('removePassphraseBtn').addEventListener('click', async (
       passphraseEl.value = '';
       await refreshEncryptionStatus();
       showStatus('Passphrase removed.');
+    } else if (response?.error === 'persist-failed') {
+      showStatus('Could not save the change — the passkey is still in effect. Check available disk space and retry.', true);
     } else {
       showStatus('Failed to remove passphrase.', true);
     }
@@ -553,31 +549,13 @@ if (retryImportBtn) {
   });
 }
 
-cloudBackupEl.addEventListener('change', async () => {
-  const previousValue = !cloudBackupEl.checked;
-  try {
-    const result = await sendMessage('SET_CLOUD_BACKUP', { enabled: cloudBackupEl.checked });
-    if (!result?.ok) {
-      cloudBackupEl.checked = previousValue;
-      if (result?.error === 'passkey-required') {
-        showStatus('Set a passkey before enabling cloud backup.', true);
-      } else {
-        showStatus('Failed to update cloud backup.', true);
-      }
-      await refreshEncryptionStatus();
-      return;
-    }
-    await refreshEncryptionStatus();
-    showStatus('Cloud backup preference saved.');
-  } catch (err) {
-    console.error('Failed to toggle cloud backup', err);
-    cloudBackupEl.checked = previousValue;
-    showStatus('Failed to update cloud backup.', true);
-  }
-});
-
 resetEncryptionBtn.addEventListener('click', async () => {
-  if (!confirm('This will erase encrypted session data and snapshots and generate a new key. Continue?')) {
+  if (!confirm(
+    'This will erase encrypted session data and snapshots on THIS DEVICE and generate a new key.\n\n'
+    + 'It cannot remove key material that an earlier cloud-backup build may have already '
+    + 'synced to your Google account — this build has no access to synced storage by design. '
+    + 'See SECURITY.md if this profile was ever used with that build.\n\nContinue?'
+  )) {
     return;
   }
   try {

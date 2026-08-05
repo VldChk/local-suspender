@@ -1,210 +1,265 @@
-# Local Suspender — Developer Guide
+# CLAUDE.md
 
-## Project Identity
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-- **Name:** Local Suspender
-- **Author:** VldChk
-- **License:** MIT
-- **Platform:** Chrome MV3 extension, vanilla JavaScript (ES modules)
-- **No external dependencies** at runtime (dev-only: ESLint, archiver)
+Companion docs: **`SECURITY.md`** is the authoritative threat model and the document a reviewer reads first. **`AGENTS.md`** holds release checklists, branding guardrails, and the pre-merge scan. Don't duplicate either here.
 
-## Architecture Overview
+## Branch: `absolutely-local`
 
-```
-extension/           <- packaged into the .zip / loaded by Chrome
-  background.js      Service worker: core logic, state, alarms, message handler
-  encryption.js      AES-256-GCM key management (generate, wrap, unwrap, session)
-  settings.js        Settings schema, defaults, persistence
-  session.js         chrome.storage.session wrapper with in-memory fallback
-  logger.js          Structured logger → chrome.storage.local.logs[]
-  popup.html/js/css  Toolbar popup: suspend/unsuspend actions, tab list
-  options.html/js/css Options page: settings form, encryption panel, snapshots
-  suspended.html/js/css Parked-tab page: token-based unsuspend flow
-  manifest.json      MV3 manifest
-scripts/
-  package-extension.mjs  Archives extension/ into dist/*.zip
-```
+This branch removes all network egress. It is a distinct product from `main`, not a feature toggle:
 
-## Key Design Principles
+- **No synced storage.** The key record lives only in `chrome.storage.local`. Reintroducing `chrome.storage.sync` anywhere fails the build.
+- **No cloud backup.** `SET_CLOUD_BACKUP`, `setCloudBackupEnabled`, `cloudBackupEnabled`, `syncEligible`, `syncBlockedReason` are all gone.
+- **Manifest CSP** makes remote requests structurally impossible.
+- **`scripts/verify-no-egress.mjs`** is a release blocker wired into `npm run package`.
 
-1. **Offline-only** — zero network calls, no analytics, no telemetry
-2. **Encryption-first** — state is always AES-256-GCM encrypted in storage
-3. **MV3 compliant** — event listeners registered synchronously at module top level
-4. **XSS-safe UI** — all DOM writes use `.textContent`, never `.innerHTML` with user data
-5. **No content scripts** — operates entirely via chrome.tabs API and extension pages
+Before changing anything network-adjacent, read `SECURITY.md`. The guarantee is the product.
 
-## Storage Schema
+## What this is
 
-### chrome.storage.local
-| Key | Shape | Purpose |
-|-----|-------|---------|
-| `settings` | `{ autoSuspendMinutes, excludePinned, ... }` | User settings |
-| `suspenderState` | `{ iv, ct }` or `{ plain: { suspendedTabs } }` | Encrypted tab state |
-| `backups` | `[{ id, timestamp, tabCount, data }]` | Snapshot history |
-| `encryptionKeyRecord` | `{ usingPasskey, dataKey?, encryptedKey?, ... }` | Key material |
-| `logs` | `[{ timestamp, level, message, data }]` | Debug logs (max 1000) |
+Chrome MV3 extension that suspends idle tabs. Vanilla ES modules, zero runtime dependencies, zero network egress. Tab state is always AES-256-GCM encrypted at rest.
 
-### chrome.storage.sync
-| Key | Shape | Purpose |
-|-----|-------|---------|
-| `encryptionKeyRecord` | Same as local | Cloud backup of key record |
+## Commands
 
-### chrome.storage.session
-| Key | Shape | Purpose |
-|-----|-------|---------|
-| `cryptoKey` | JWK object | Decrypted data key for runtime |
-| `lastActive` | `{ [tabId]: timestamp }` | Per-tab last-active timestamps |
-| `pendingSuspenderState` | `{ suspendedTabs }` | Buffer while encryption is locked |
+```bash
+npm ci
+npm run verify:egress # release-blocking egress gate — run this first
+npm run lint          # eslint extension/ + scripts/ — must be clean
+npm test              # node --test (3 tests)
+npm run package       # gate, then → dist/local-suspender-<manifest.version>.zip (via yazl)
 
-## Encryption Flow
-
-```
-First install → generateDataKey() → store plaintext Base64 in key record
-With passkey  → wrapDataKey(passkey) → PBKDF2 → AES-GCM wrap → store encrypted blob
-On startup    → restore JWK from session OR import from key record OR prompt for passkey
-Locked state  → state writes go to pendingSuspenderState; reads return { locked: true }
-On unlock     → reconcile pending + persisted state → re-encrypt → clear pending
+node --test tests/unsuspend-token-flow.test.js   # single file
 ```
 
-**Key constants:**
-- AES-256-GCM (256-bit keys, 12-byte IV)
-- PBKDF2-SHA256, 150k iterations (see Known Issues)
-- 16-byte salt for key derivation
+`node --test tests/` (trailing dir) **fails** — Node resolves it as a module path, not a test dir. `npm test` uses bare `node --test` from the repo root.
 
-## Message API (background.js ↔ UI)
+`eslint.config.mjs` only globs `extension/**/*.js` and `scripts/**/*.mjs`. **`tests/` is unlinted** — running `npx eslint tests` yields a bogus `structuredClone is not defined` because tests fall through to `js.configs.recommended` with no globals configured. Add a `files: ['tests/**/*.js']` block with `globals.node` if you ever want them linted.
 
-| Message Type | Payload | Response |
+Load `extension/` unpacked at `chrome://extensions` for development.
+
+## Architecture
+
+```
+extension/
+  background.js           service worker — the whole engine
+  encryption.js           key lifecycle: generate / wrap / unwrap / session cache
+  state-codec.js          v2 compact tuple encoding + tolerant legacy decode
+  unsuspend-token-flow.js token state machine (pure, injected deps, unit-tested)
+  settings.js  session.js  logger.js
+  popup.* options.* suspended.*    three independent UI surfaces
+scripts/package-extension.mjs
+tests/unsuspend-token-flow.test.js
+docs/implementation.plan.md        historical design doc, not current spec
+```
+
+Deliberate split: `state-codec.js` and `unsuspend-token-flow.js` were extracted from `background.js` so they're testable without a `chrome` global. `unsuspend-token-flow.js` takes every dependency as a parameter — that's why it has tests and the rest doesn't. **Extract the same way when adding testable logic.**
+
+### The state write pipeline
+
+```
+{ suspendedTabs: {...} }  →  encodeStateV2  →  { v:2, tabs:[[...]] }
+                          →  encryptPayload →  { iv, ct }  (base64url)
+                          →  chrome.storage.local.suspenderState
+```
+
+Reads go through `decodeStateAny`, which sniffs `raw.v === 2` and otherwise falls back to the legacy `{ suspendedTabs }` decoder. **Both decode paths normalize** — unknown methods coerce, non-`data:`/`chrome-extension:` favicons become `''`, malformed entries drop. Never bypass the codec; hand-written state objects will silently lose fields on the next round-trip.
+
+Tuple order (`state-codec.js`) is positional and load-bearing:
+`[tabId, url, title, windowId, suspendedAt, method, reason, token, tokenIssuedAt, tokenUsed, favIconUrl]`
+`method` encodes as `0`=discard, `1`=page. Appending a field is safe (decode requires `length >= 11`); reordering is not.
+
+### Concurrency model — read before touching state
+
+`background.js` documents its lock hierarchy at the top. Acquire in this order or deadlock:
+
+```
+snapshotLock  →  stateLock
+reconciliationLock is independent; saveState awaits it but never holds stateLock while waiting
+```
+
+- `withStateLock(fn)` — serializes every read-modify-write of `cachedState`. Any handler mutating `suspendedTabs` must be inside it.
+- **Re-check `stateIsWritable()` inside the lock**, not just before acquiring it. Every existing handler does this; the lock can be held across an unlock/corruption transition.
+- `deferStateWrite: true` — `suspendTab` returns `{ ok, patch }` instead of writing. Bulk callers (`autoSuspendTick`, `SUSPEND_INACTIVE`) collect patches, then apply them all under **one** lock, re-verifying each tab still matches its claimed method before committing. This is why bulk suspension doesn't thrash the encrypt path.
+- `chrome.storage.onChanged` on `suspenderState` invalidates `cachedState` — external writes won't be silently overwritten.
+
+### Encryption state machine
+
+```
+first install    → generateAndPersistDataKey() → raw key, base64, local only
+set passkey      → PBKDF2-SHA256 → AES-GCM wrap → { encryptedKey, keySalt, keyIV, iterations }
+worker restart   → restoreKeyFromSession() (JWK, imported NON-extractable)
+                 → else import from key record
+                 → else markEncryptionLocked('passkey-required' | 'corrupt-key')
+unlock           → unwrapDataKey → reconcilePendingStateAfterUnlock() → re-encrypt
+```
+
+Two independent gates, and code must distinguish them:
+
+| Gate | Set by | Meaning |
+|------|--------|---------|
+| **locked** | no key available | `passkey-required`, `bad-passkey`, `corrupt-key` |
+| **corrupt** | key works, ciphertext doesn't | `corrupt-state` |
+
+`stateWriteBlockedReason()` folds both; `stateIsWritable()` is its negation. A corrupt state must **never** be silently overwritten with an empty one — the only recovery is explicit `RESET_ENCRYPTION`.
+
+**The key never leaves the device.** `persistKeyRecord`/`loadKeyRecord`/`clearKeyRecords` touch `chrome.storage.local` only. There is no escrow, no backup, no recovery path — uninstalling destroys the key and the suspended tabs with it, deliberately. `settings.js` uses an explicit allowlist rather than a spread so a settings blob migrated from `main` drops its key-escrow flags on first read instead of silently carrying them.
+
+PBKDF2: default **600,000** iterations, floor `MIN_ITERATIONS = 150,000` enforced on wrap. Unwrap deliberately uses the record's stored count *without* the floor (old records must stay openable), then `unlockWithPasskey` transparently re-wraps at the higher count.
+
+## Feature spec
+
+### Suspension
+
+Two methods, chosen by `settings.unsuspendMethod`:
+
+| Setting | Method | Behavior |
+|---------|--------|----------|
+| `'manual'` | **page** | Tab navigates to `suspended.html?token=…`; user clicks to wake |
+| `'activate'` | **discard** | `chrome.tabs.discard()`; Chrome auto-reloads on focus |
+
+`suspendViaDiscard` verifies the discard **twice** — immediately, then again after 1s — because Chrome silently reloads some tabs. Either check failing falls back to page suspension. Any throw also falls back.
+
+**Safety skips** (`getSuspendSafetySkipReason`, always enforced): missing tab, `incognito`, `chrome://`, `chrome-extension://`, or any protocol outside `http/https/file/ftp`.
+
+**Auto-policy skips** (`shouldSuspendByAutoPolicy`, *auto flows only*): `excludeActive`, `excludePinned`, `excludeAudible`, whitelist match, idle threshold not met.
+
+The split matters: `SUSPEND_CURRENT` (manual, one tab) applies **only** safety checks — a pinned, audible, just-touched tab still suspends when the user explicitly asks. `SUSPEND_INACTIVE` and `autoSuspendTick` apply both.
+
+Idle time comes from `lastActiveCache[tabId] ?? tab.lastAccessed ?? now`. The cache is coalesced to `chrome.storage.session` on a 3s debounce and pruned in `autoSuspendTick` against `chrome.tabs.query({})` — **all** window types, not just `normal`, or entries for devtools/popup tabs leak forever.
+
+`autoSuspendTick` runs 5 concurrent workers (`AUTO_SUSPEND_BATCH_LIMIT`).
+
+### Unsuspension
+
+Page-suspended tabs carry a `crypto.randomUUID()` token with a 24h TTL and a single-use flag. `processUnsuspendTokenMessage` is a three-phase state machine:
+
+1. **Reserve** — validate token/TTL/unused, set `tokenUsed = true`, save. Blocks concurrent attempts.
+2. **Resume** — navigate the tab. **On failure, roll `tokenUsed` back to `false`** so the user can retry.
+3. **Finalize** — delete the entry, save.
+
+All three tests in `tests/` pin this. A second use after success returns `invalid-token` (entry is gone), not `used`.
+
+`suspended.js` degrades gracefully: if the background is locked or unreachable and `embedOriginalUrl` was on, it navigates straight to the `?url=` param — but only through `isSafeNavigationUrl`.
+
+### Snapshots
+
+Every 180 min, `SnapshotService.createSnapshot()` validates state against live tabs, encodes v2, encrypts, appends. Retention: 7 days **and** max 20, whichever bites first (`pruneSnapshots`). Skipped entirely if encryption is locked — never writes a plaintext fallback.
+
+`OPEN_SNAPSHOT` opens a new window; `unsuspend: false` re-parks each tab behind a **fresh** token and dedupes against both current state and within the batch. `RESTORE_SNAPSHOT` replaces live state wholesale. Both filter through `isSafeUrl`.
+
+`GET_SNAPSHOT_DETAILS` is backed by a 10-entry LRU (`snapshotDetailsCache`), invalidated on any snapshot mutation — it hands out **clones**, so callers can't mutate the cache.
+
+### Favicons
+
+The `favicon` permission exists for one thing: `captureFaviconAsDataUri` fetches `chrome.runtime.getURL('/_favicon/?pageUrl=…&size=32')` and inlines the result as a `data:` URI. Guards: 500ms `AbortController` timeout, 8KB cap, MIME allowlist, `http(s)` pages only. Failure is non-fatal — the tab suspends without an icon.
+
+**Hard rule, enforced in five places** (`isLocalFaviconParamSafe`, `shouldEmbedFaviconParam`, `sanitizeStateFaviconUrls`, `normalizeFaviconUrl`, `isLocalFaviconUrl`): only `data:` and `chrome-extension:` favicon URLs are ever persisted, embedded in a URL, or rendered. A remote `https://` favicon URL would leak browsing history to that origin on every render of the parked page. Never relax this.
+
+When no favicon survives, `suspended.js` generates a deterministic identicon from the token: FNV-1a hash → xorshift PRNG → mirrored 5×5 grid, with an HSL palette that enforces a 45-point lightness delta for contrast. Density is re-rolled up to 4× to land in 6–19 cells, then falls back to a fixed pattern. Same token always yields the same icon.
+
+### Whitelist
+
+`wildcardToRegExp` strips protocol/`www.`/trailing slash, escapes regex chars except `*`, converts `*`→`.*?` (lazy, deliberately). No `/` in the pattern ⇒ domain match `(^|\.)host(\/|$)`, so `leetcode.com` matches `sub.leetcode.com` and `leetcode.com/problems` but **not** `myleetcode.com`. With a `/` ⇒ anchored prefix match. Compiled regexes are cached keyed on the joined pattern list.
+
+Saving settings with a non-empty whitelist fires `unsuspendWhitelistedTabs` in the background (fire-and-forget) — already-suspended matches wake automatically.
+
+### State validation
+
+`validateState` batch-queries all tabs once and prunes entries whose tab is gone, went incognito, has an unsafe URL, or whose real state contradicts its recorded `method` (`discard` entry on a non-discarded tab, `page` entry not on `suspended.html`).
+
+Two schedulers, by design: the `stateValidator` alarm every 15 min is the **durable** one (survives worker suspension); `maybeScheduleValidation` is an opportunistic 250ms debounce off `GET_STATE`, throttled to 60s. That throttle is in-memory and **intentionally resets on worker restart** so a freshly-woken worker can validate immediately.
+
+## Message API
+
+Every UI surface talks to `background.js` through `chrome.runtime.sendMessage`. `handleMessage` returns `true` and wraps everything in an async IIFE with a `try/catch` that responds `{ ok: false, error: 'internal-error' }`.
+
+| Type | Payload | Response |
 |---|---|---|
-| `GET_SETTINGS` | — | Settings object |
-| `SAVE_SETTINGS` | `{ payload }` | `{ ok }` |
-| `GET_STATE` | — | `{ locked, state? }` |
-| `SUSPEND_CURRENT` | — | `{ ok }` |
-| `SUSPEND_INACTIVE` | — | `{ ok }` |
-| `RESUME_TAB` | `{ tabId }` | `{ ok }` |
-| `RESUME_ALL` | — | `{ ok }` |
-| `SUSPENDED_VIEW_INFO` | `{ token, tabId? }` | `{ found, info? }` |
-| `UNSUSPEND_TOKEN` | `{ token, tabId }` | `{ ok, error? }` |
-| `GET_ENCRYPTION_STATUS` | — | `{ locked, reason, usingPasskey, ... }` |
-| `UNLOCK_WITH_PASSKEY` | `{ passkey }` | `{ ok, error? }` |
-| `SET_PASSKEY` | `{ passkey }` | `{ ok, error? }` |
-| `REMOVE_PASSKEY` | — | `{ ok, error? }` |
-| `SET_CLOUD_BACKUP` | `{ enabled }` | `{ ok }` |
-| `RESET_ENCRYPTION` | — | `{ ok }` |
-| `GET_SNAPSHOTS` | — | `{ snapshots }` or `{ locked }` |
-| `GET_SNAPSHOT_DETAILS` | `{ snapshotId }` | `{ ok, tabs? }` |
-| `RESTORE_SNAPSHOT` | `{ snapshotId }` | `{ ok }` |
-| `OPEN_SNAPSHOT` | `{ snapshotId, unsuspend? }` | `{ ok, opened }` |
-| `RETRY_IMPORT_KEY` | — | `{ ok, error? }` |
+| `GET_SETTINGS` | — | settings object (**no `ok` wrapper**) |
+| `SAVE_SETTINGS` | `{ payload }` | `{ ok: true }` |
+| `GET_ENCRYPTION_STATUS` | — | `{ locked, reason, usingPasskey, hasKeyRecord }` |
+| `UNLOCK_WITH_PASSKEY` | `{ passkey }` | `{ ok }` \| `{ ok:false, error: 'bad-passkey' \| 'not-locked' \| 'corrupt-state' }` |
+| `RETRY_IMPORT_KEY` | — | `{ ok }` \| `{ ok:false, error: 'no-plaintext-record' \| 'corrupt-key' }` |
+| `SET_PASSKEY` | `{ passkey }` | `{ ok }` \| `{ ok:false, error: 'missing-passkey' \| 'locked' }` |
+| `REMOVE_PASSKEY` | — | `{ ok }` \| `{ ok:false, error: 'locked' }` |
+| `RESET_ENCRYPTION` | — | `{ ok: true }` |
+| `SUSPEND_CURRENT` | — | `{ ok:true }` \| `{ ok:true, skipped: 'incognito' \| 'unsafe-url' \| 'policy-excluded' \| 'locked' }` |
+| `SUSPEND_INACTIVE` | — | `{ ok:true }` \| `{ ok:true, skipped:'locked', reason }` |
+| `RESUME_TAB` | `{ tabId }` | `{ ok:true }` \| `{ ok:false, locked:true, reason }` |
+| `RESUME_ALL` | — | same as `RESUME_TAB` |
+| `GET_STATE` | — | `{ ok:true, locked:false, state }` \| `{ ok:false, locked:true, reason }` |
+| `SUSPENDED_VIEW_INFO` | `{ token, tabId? }` | `{ found:true, info }` \| `{ found:false }` \| `{ ok:false, locked:true, reason }` |
+| `UNSUSPEND_TOKEN` | `{ token, tabId }` | `{ ok:true }` \| `{ ok:false, error: 'invalid-token' \| 'used' \| 'expired' \| 'resume-failed' }` |
+| `GET_SNAPSHOTS` | — | `{ snapshots }` (**no `ok`**) \| `{ ok:false, locked:true, reason }` |
+| `GET_SNAPSHOT_DETAILS` | `{ snapshotId }` | `{ ok:true, tabs }` \| `{ ok:false, error }` |
+| `RESTORE_SNAPSHOT` | `{ snapshotId }` | `{ ok:true }` \| `{ ok:false, error }` |
+| `OPEN_SNAPSHOT` | `{ snapshotId, unsuspend? }` | `{ ok:true, opened }` \| `{ ok:false, error:'not-found' }` \| `{ ok:false, locked:true }` |
+
+Unknown type → `{ ok:false, error:'Unknown message' }`. Init failure → `{ ok:false, error:'initialization-failed' }`.
+
+**Response shapes are inconsistent** — `GET_SETTINGS` and `GET_SNAPSHOTS` omit `ok`. `popup.js` normalizes via `interpretActionResult()`; reuse it rather than re-deriving the truthiness rules.
+
+## Storage schema
+
+**`chrome.storage.local`**
+
+| Key | Shape |
+|-----|-------|
+| `settings` | see `defaultSettings` in `settings.js` |
+| `suspenderState` | `{ iv, ct }` (base64url) or `{ plain: { v:2, tabs:[…] } }` |
+| `backups` | `[{ id, timestamp, tabCount, data }]`, `data` encrypted like above |
+| `encryptionKeyRecord` | `{ usingPasskey, dataKey? \| encryptedKey+keySalt+keyIV+iterations, keyVersion, updatedAt }` |
+| `logs` | ring buffer, max 1000 |
+
+**`chrome.storage.sync`** — **not used.** Adding a call fails `npm run verify:egress`.
+
+**`chrome.storage.session`** (via `session.js`, in-memory fallback) — `cryptoKey` (JWK), `lastActive` (`{[tabId]: ts}`).
+`pendingSuspenderState` is **legacy**: deleted on every `init()` and `onStartup`. Don't reintroduce it.
 
 ## Alarms
 
 | Name | Period | Purpose |
 |------|--------|---------|
-| `autoSuspend` | `autoSuspendMinutes / 3` (1-60 min) | Run auto-suspension tick |
-| `snapshotTimer` | 180 min | Create encrypted state snapshot |
-| `stateValidator` | 15 min | Prune orphaned tab entries |
+| `autoSuspend` | `clamp(round(autoSuspendMinutes / 3), 1, 60)` min | suspension tick |
+| `snapshotTimer` | 180 min | encrypted snapshot |
+| `stateValidator` | 15 min | prune orphaned entries |
 
-## Tab Suspension Methods
+`init()` only creates alarms that don't already exist. `onInstalled` (both `install` and `update`) force-recreates `autoSuspend` and `snapshotTimer` but **not** `stateValidator` — that one is only ever created by `init()`. `saveSettings` always reschedules `autoSuspend`.
 
-1. **Discard** (`chrome.tabs.discard`) — native memory release, Chrome auto-reloads on focus
-2. **Page** (`suspended.html`) — navigates tab to a parked page with token-based unsuspend
+## Tunables
 
-Selection: `unsuspendMethod === 'manual'` → page, otherwise → discard (with page fallback if discard fails).
+`background.js`: `TOKEN_TTL_MS` 24h · `SNAPSHOT_RETENTION_DAYS` 7 · `SNAPSHOT_MAX` 20 · `AUTO_SUSPEND_BATCH_LIMIT` 5 · `FAVICON_CAPTURE_TIMEOUT_MS` 500 · `FAVICON_MAX_BYTES` 8192 · `STATE_VALIDATION_THROTTLE_MS` 60s · `VALIDATION_DEBOUNCE_MS` 250 · `LAST_ACTIVE_FLUSH_DELAY_MS` 3000 · `SNAPSHOT_DETAILS_CACHE_LIMIT` 10
+`encryption.js`: `MIN_ITERATIONS` 150000 · `KEY_VERSION` 1
+`logger.js`: `MAX_LOGS` 1000 · flush at 2s or 20 entries, immediate on `error`
 
-## Token System
+## Invariants
 
-Each page-suspended tab gets a `crypto.randomUUID()` token with:
-- 24-hour TTL (`TOKEN_TTL_MS`)
-- Single-use flag (`tokenUsed`)
-- Embedded in suspended page URL params (if `embedOriginalUrl` enabled)
+1. Event listeners registered **synchronously at module top level**; handlers `await ready` before touching state. MV3 drops late registrations.
+2. All state mutation inside `withStateLock`, re-checking `stateIsWritable()` **inside** the lock.
+3. `entry.method` must match reality — `'discard'` only for genuinely discarded tabs, `'page'` only for tabs on `suspended.html`.
+4. Never persist incognito tab metadata.
+5. Never write plaintext session state to persistent storage.
+6. **Zero egress.** No synced storage, no remote request, no new permission. `npm run verify:egress` must pass; it is a release blocker, not advisory.
+7. Only `data:` / `chrome-extension:` favicon URLs get stored, embedded, or rendered.
+8. `.textContent` only in UI code — never `.innerHTML` with dynamic data. `target="_blank"` requires `rel="noopener noreferrer"`.
+9. Corrupt state fails loudly; it is never silently replaced with an empty state.
+10. `settings.encryption.enabled` is forced `true` on every merge path.
 
-## Coding Conventions
+## Known gaps
 
-- ES modules throughout (`import`/`export`, `type: "module"` in manifest)
-- `async`/`await` for all async operations
-- UI uses `.textContent` exclusively (never `innerHTML` with dynamic data)
-- Settings spread-merged with `defaultSettings` to ensure all fields present
-- Encryption always enabled (`encryption.enabled: true` is forced)
-- Logger writes to both `console` and `chrome.storage.local.logs`
+Verified against source on 2026-08-06. Everything not listed here that older notes flagged (cachedState races, token reuse, plaintext key in Sync, PBKDF2 iterations, `lastActiveCache` leak, `handleMessage` error boundary, `getSnapshots` race, greedy wildcard, snapshot URL validation, duplicate open-snapshot paths, missing `.gitignore`, missing `npm test`) **is fixed** — don't re-fix it.
 
-## Known Issues (by severity)
+- **Data key is exportable.** `generateDataKey` / `importKeyBase64` / `unwrapDataKey` create it with `extractable: true` — required so `setPasskey` can re-wrap it. `restoreKeyFromSession` and `deriveWrappingKey` correctly import non-extractable.
+- **Key JWK sits in `chrome.storage.session`** — readable by any code in the extension context. The price of surviving MV3 worker restarts without re-prompting.
+- **No key rotation.** `keyVersion` is written but never acted on.
+- **No rate limiting** on `UNLOCK_WITH_PASSKEY` attempts.
+- **No `icons` in `manifest.json`** — Chrome renders the default puzzle piece.
+- **`tests/` is outside the ESLint config** — `npx eslint tests` yields a bogus `structuredClone is not defined` (see Commands).
+- **The `_favicon` read depends on a Chromium implementation detail** — the origin gate in `favicon_source.cc`. Not enforceable from our manifest. Documented in SECURITY.md §3 with the removal path if a deployment won't accept it.
+- Inconsistent message response shapes (see Message API).
 
-### CRITICAL
-- **Race conditions on cachedState** — concurrent async read-modify-write without mutex. Multiple handlers (handleTabUpdated, autoSuspendTick, suspendTab) can modify state simultaneously, causing lost updates.
-- **Token reuse** — `tokenUsed` flag is checked but never set to `true` after successful unsuspend in `UNSUSPEND_TOKEN` handler. Tokens can theoretically be replayed.
-- **Plaintext key in Chrome Sync** — when no passkey is set and cloud backup is enabled, the AES data key is stored in plaintext Base64 in `chrome.storage.sync`.
-- **JWK in session storage** — the decrypted key is exported as JWK and stored in `chrome.storage.session`, readable by any code in the extension context.
+## Conventions
 
-### HIGH
-- **PBKDF2 iterations** — 150k is below OWASP 2023 recommendation of 600k+ for SHA-256.
-- **All CryptoKeys are extractable** — keys created with `extractable: true`, allowing memory extraction.
-- **No key rotation** — `keyVersion` field exists but no rotation mechanism is implemented.
-- **lastActiveCache memory leak** — orphaned entries for closed tabs accumulate; no pruning in `autoSuspendTick`.
-- **Missing outer error boundary in handleMessage** — uncaught errors in the async IIFE go unhandled.
-- **Snapshot concurrency** — `getSnapshots()` doesn't use `snapshotLock`, can race with `createSnapshot()`.
+ES modules (`"type": "module"` in the manifest background entry) · `async`/`await` throughout · settings always spread-merged with `defaultSettings` · `Logger` writes to both `console` and `chrome.storage.local.logs` · no content scripts — everything runs through `chrome.tabs` and extension pages.
 
-### MEDIUM
-- **wildcardToRegExp greedy quantifier** — uses `.*` instead of `.*?`, minor ReDoS risk.
-- **No iteration count validation** — stored record could have `iterations: 1`.
-- **No URL validation in snapshot restore** — `javascript:` or `chrome://` URLs not filtered.
-- **Duplicate code: SnapshotService.openSnapshot vs openSnapshotTabs** — two similar implementations for opening snapshot tabs.
-- **Redundant validateState calls** in handleTabRemoved/handleTabUpdated.
-- **handleTabUpdated loads state 3 times** — should load once and reuse.
-
-### LOW
-- **Dead code** — `UNSUSPEND_TOKEN` has redundant token check at line 1289 (already validated at 1276).
-- **No rate limiting** on passkey unlock attempts.
-- **Missing icons** in manifest.
-- **implementation.plan.md** inside `extension/` gets packaged; should be moved out.
-- **Inconsistent error response shapes** across message handlers.
-- **Favicon caching blocks suspension** — network fetch (up to 1.5s) during `suspendViaDiscard`/`suspendViaPage`.
-
-## Development
-
-```bash
-npm install          # Install dev dependencies (ESLint, archiver)
-npm run lint         # ESLint check on extension/
-npm run package      # Create dist/*.zip
-```
-
-Load the `extension/` directory as an unpacked extension in Chrome for development.
-
-## File-by-File Guide
-
-### background.js (1360 lines)
-The service worker. Contains:
-- `init()` — loads settings, encryption, schedules alarms
-- Event listeners (tabs, alarms, idle, storage, runtime)
-- `SnapshotService` — snapshot CRUD with serialized locking
-- `autoSuspendTick()` — periodic suspension of idle tabs
-- `suspendTab()` / `suspendViaDiscard()` / `suspendViaPage()` — suspension logic
-- `handleMessage()` — central message router (20+ message types)
-- `encryptPayload()` / `decryptPayload()` — state encryption wrappers
-- `reconcilePendingStateAfterUnlock()` — merges pending state after key unlock
-
-### encryption.js (406 lines)
-Key management module. Exports:
-- `initializeEncryption()` — startup key restoration/generation
-- `getCryptoKey()` / `isEncryptionLocked()` — state queries
-- `generateDataKey()` / `wrapDataKey()` / `unwrapDataKey()` — key lifecycle
-- `setPasskey()` / `removePasskey()` / `unlockWithPasskey()` — passkey flow
-- `setCloudBackupEnabled()` — cloud sync toggle
-- `persistKeyRecord()` / `loadKeyRecord()` — storage layer
-
-### settings.js (56 lines)
-Simple settings manager with `defaultSettings`, `ensureSettings()`, and `saveSettings()`. Forces `encryption.enabled: true` always.
-
-### session.js (24 lines)
-Wraps `chrome.storage.session` with in-memory fallback for environments where session storage is unavailable.
-
-### logger.js (28 lines)
-Writes to both `console` and `chrome.storage.local.logs[]` (ring buffer, max 1000 entries).
-
-### popup.js (202 lines)
-Toolbar popup. Detects if current tab is suspended (shows context-aware UI), lists suspended tabs, handles suspend/unsuspend actions.
-
-### options.js (545 lines)
-Options page. Settings form, encryption status panel, passkey management, snapshot browser with expand/collapse details, log download/clear.
-
-### suspended.js (176 lines)
-Parked tab page. Reads token from URL params, fetches tab info from background, handles unsuspend flow with fallback to direct navigation.
+**Do not add line counts or per-function file listings to this document.** The previous revision carried both; every number was 30–70% wrong within a few commits.

@@ -49,7 +49,7 @@
 
           <div class="form-group">
             <label for="whitelist">Never suspend these URL patterns (one per line)</label>
-            <textarea id="whitelist" rows="4" class="form-textarea" placeholder="https://mail.google.com/*"></textarea>
+            <textarea id="whitelist" rows="4" class="form-textarea" placeholder="example.com&#10;mail.example.com/*"></textarea>
           </div>
         </div>
 
@@ -57,18 +57,12 @@
         <div class="card">
           <h2>Data & Privacy</h2>
           <p class="card-description">
-            Your session history is encrypted locally. You can optionally set a passphrase for extra security.
+            This build never sends data off your device. Your session history is encrypted
+            with a key generated on this machine and stored only here. You can optionally set
+            a passphrase for extra protection against local disk access.
           </p>
 
           <div id="encryptionStatus" class="status-indicator"></div>
-
-          <div class="form-group checkbox-group">
-            <label class="checkbox-label">
-              <input type="checkbox" id="cloudBackup" />
-              <span>Back up encryption key to Chrome Sync</span>
-            </label>
-            <p id="cloudWarning" class="hint hidden">Cloud backup requires a passkey-protected key.</p>
-          </div>
 
           <div class="form-group checkbox-group">
             <label class="checkbox-label">
